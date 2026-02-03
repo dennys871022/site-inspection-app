@@ -6,50 +6,22 @@ from PIL import Image
 import io
 import datetime
 
-# --- 1. 樣式複製核心工具 (關鍵修正) ---
+# --- 1. 基礎設定 ---
 
-def get_run_style(run):
+def set_font_style(run, font_name='標楷體', size=12):
     """
-    【關鍵功能】記錄原本 Word 樣板裡文字的格式
-    包含：字型名稱、中文字型、大小、粗體、斜體、底線、顏色
+    設定字型：
+    1. 英數使用 Times New Roman
+    2. 中文強制使用 標楷體
+    3. 字體大小 (Size) 預設為 None -> 代表不修改，直接繼承樣板原本的大小
     """
-    style = {}
-    style['name'] = run.font.name
-    style['size'] = run.font.size
-    style['bold'] = run.bold
-    style['italic'] = run.italic
-    style['underline'] = run.underline
-    style['color'] = run.font.color.rgb
-    
-    # 嘗試獲取中文字型設定 (East Asia Font)
-    try:
-        rPr = run._element.rPr
-        if rPr is not None and rPr.rFonts is not None:
-            style['eastAsia'] = rPr.rFonts.get(qn('w:eastAsia'))
-        else:
-            style['eastAsia'] = None
-    except:
-        style['eastAsia'] = None
-        
-    return style
-
-def apply_run_style(run, style):
-    """
-    【關鍵功能】將記錄下來的格式，套用到新的文字上
-    """
-    if style.get('name'): run.font.name = style.get('name')
-    if style.get('size'): run.font.size = style.get('size')
-    if style.get('bold') is not None: run.bold = style.get('bold')
-    if style.get('italic') is not None: run.italic = style.get('italic')
-    if style.get('underline') is not None: run.underline = style.get('underline')
-    if style.get('color'): run.font.color.rgb = style.get('color')
-    
-    # 套用中文字型
-    if style.get('eastAsia'):
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), style.get('eastAsia'))
+    run.font.name = 'Times New Roman'
+    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+    if size:
+        run.font.size = Pt(size)
 
 def compress_image(image_file, max_width=800):
-    """圖片壓縮與轉向"""
+    """圖片壓縮與轉向處理"""
     img = Image.open(image_file)
     if img.mode == 'RGBA':
         img = img.convert('RGB')
@@ -67,75 +39,45 @@ def compress_image(image_file, max_width=800):
     img_byte_arr.seek(0)
     return img_byte_arr
 
-# --- 2. 替換邏輯：先備份樣式，再替換文字 ---
+# --- 2. 核心功能：精準填空 ---
 
 def replace_text_content(doc, replacements):
-    """通用文字替換"""
+    """通用文字替換：將 {key} 換成 value"""
+    # 遍歷所有表格
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    replace_paragraph_strict(paragraph, replacements)
+                    replace_paragraph(paragraph, replacements)
+    # 遍歷一般段落
     for paragraph in doc.paragraphs:
-        replace_paragraph_strict(paragraph, replacements)
+        replace_paragraph(paragraph, replacements)
 
-def replace_paragraph_strict(paragraph, replacements):
+def replace_paragraph(paragraph, replacements):
     """
-    嚴格保留格式的替換邏輯：
-    1. 嘗試在單一 Run 替換 (最完美)。
-    2. 若失敗，則重寫段落，但強制套用「第一個 Run」的原始樣式。
+    在段落中尋找並替換文字。
+    優先嘗試 Run Level 替換，保留原本的字體大小與粗細。
     """
     if not paragraph.text:
         return
 
-    original_text = paragraph.text
-    # 檢查是否有需要替換的關鍵字
-    needs_replace = False
-    for key in replacements:
-        if key in original_text:
-            needs_replace = True
-            break
-    
-    if not needs_replace:
-        return
-
-    # 策略 A: 嘗試簡單替換 (不破壞 Run 結構)
-    # 如果關鍵字剛好在一個 Run 裡面，直接換掉文字，格式會自動保留
-    for run in paragraph.runs:
-        for key, value in replacements.items():
-            if key in run.text:
-                if value is None: value = ""
-                run.text = run.text.replace(key, str(value))
-                # 成功替換後，不需要做其他事，格式原本就在
-    
-    # 再次檢查是否還有殘留的 Key (代表 Key 被 Word 切割在不同 Run 之間)
-    remaining_text = paragraph.text
-    still_has_key = False
-    for key in replacements:
-        if key in remaining_text:
-            still_has_key = True
-            break
+    for key, value in replacements.items():
+        if key in paragraph.text:
+            val_str = str(value) if value is not None else ""
             
-    # 策略 B: 如果關鍵字被切割，必須重寫段落，但要「複製樣式」
-    if still_has_key:
-        # 1. 備份第一個 Run 的樣式 (通常是我們想要的樣式)
-        saved_style = {}
-        if paragraph.runs:
-            saved_style = get_run_style(paragraph.runs[0])
-        
-        # 2. 執行全段落文字替換
-        new_text = original_text
-        for key, value in replacements.items():
-            if value is None: value = ""
-            new_text = new_text.replace(key, str(value))
+            # 策略 A: 嘗試在單一 Run (樣式區塊) 中找到完整關鍵字
+            replaced_in_run = False
+            for run in paragraph.runs:
+                if key in run.text:
+                    run.text = run.text.replace(key, val_str)
+                    set_font_style(run, size=None) 
+                    replaced_in_run = True
             
-        # 3. 清空舊內容
-        paragraph.clear() 
-        # (clear() 會保留段落屬性如置中，但刪除所有 run)
-        
-        # 4. 加入新文字並套用備份的樣式
-        new_run = paragraph.add_run(new_text)
-        apply_run_style(new_run, saved_style)
+            # 策略 B: 如果關鍵字被 Word 切割，則重寫整個段落
+            if not replaced_in_run:
+                paragraph.text = paragraph.text.replace(key, val_str)
+                for run in paragraph.runs:
+                    set_font_style(run, size=None)
 
 def replace_placeholder_with_image(doc, placeholder, image_stream):
     """找到 {img_X} 並替換成圖片"""
@@ -144,7 +86,7 @@ def replace_placeholder_with_image(doc, placeholder, image_stream):
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     if placeholder in paragraph.text:
-                        # 備份對齊方式 (通常已經設定好)
+                        # 備份對齊方式
                         alignment = paragraph.alignment
                         paragraph.text = "" 
                         paragraph.alignment = alignment
@@ -157,15 +99,15 @@ def replace_placeholder_with_image(doc, placeholder, image_stream):
 
 # --- 3. 主流程 ---
 
-def generate_fixed_report(template_file, context, photo_data):
-    doc = Document(template_file)
+def generate_fixed_report(template_bytes, context, photo_data):
+    # 從記憶體讀取樣板
+    doc = Document(io.BytesIO(template_bytes))
     
     # 1. 填入基本資料
-    # 格式：{key} -> value
     text_replacements = {f"{{{k}}}": v for k, v in context.items()}
     replace_text_content(doc, text_replacements)
     
-    # 2. 填入照片與說明 (1~8)
+    # 2. 填入照片與說明 (處理 1~8 張)
     for i in range(1, 9):
         img_key = f"{{img_{i}}}"
         info_key = f"{{info_{i}}}"
@@ -177,16 +119,16 @@ def generate_fixed_report(template_file, context, photo_data):
             # (A) 填入圖片
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
             
-            # (B) 填入文字 (日期往右調整)
-            # 這裡加入了 8 個全形空白，讓日期更靠右
-            info_text = f"照片編號：{data['no']:02d}　　　　　　　　日期：{data['date_str']}\n"
+            # (B) 填入文字 (日期往右調整 - 減少一格全形空白)
+            # 這裡的全形空白數量從 8 個減少為 7 個
+            info_text = f"照片編號：{data['no']:02d}　　　　　　　日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
             info_text += f"實測：{data['result']}"
             
             replace_text_content(doc, {info_key: info_text})
             
         else:
-            # 沒資料則清空
+            # 沒資料則清空佔位符
             replace_text_content(doc, {img_key: ""})
             replace_text_content(doc, {info_key: ""})
             
@@ -195,18 +137,38 @@ def generate_fixed_report(template_file, context, photo_data):
 # --- 4. Streamlit UI ---
 
 st.set_page_config(page_title="自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (樣式完美複製版)")
+st.title("🏗️ 工程自主檢查表 (記憶樣板版)")
 
+# --- 初始化 Session State ---
 if 'doc_buffer' not in st.session_state:
     st.session_state['doc_buffer'] = None
 if 'doc_name' not in st.session_state:
     st.session_state['doc_name'] = ""
+# 初始化樣板儲存區
+if 'saved_template' not in st.session_state:
+    st.session_state['saved_template'] = None
+if 'template_name' not in st.session_state:
+    st.session_state['template_name'] = "尚未上傳"
 
 with st.sidebar:
     st.header("1. 上傳樣板")
-    st.info("請確認 Word 樣板內的 `{project_name}` 或 `{info_1}` 已經設定好您要的字體大小與粗細。程式會直接複製它。")
-    template_file = st.file_uploader("Word 樣板", type=['docx'])
     
+    # 顯示目前使用的樣板狀態
+    if st.session_state['saved_template']:
+        st.success(f"✅ 目前使用樣板：{st.session_state['template_name']}")
+        st.info("如需更換，請在下方上傳新檔案，否則將沿用舊樣板。")
+    else:
+        st.warning("⚠️ 目前無樣板，請上傳。")
+
+    # 檔案上傳區
+    uploaded_template = st.file_uploader("上傳新 Word 樣板 (.docx)", type=['docx'])
+    
+    # 如果有新檔案上傳，更新 Session State
+    if uploaded_template:
+        st.session_state['saved_template'] = uploaded_template.getvalue()
+        st.session_state['template_name'] = uploaded_template.name
+        st.rerun() # 重新整理以更新狀態顯示
+
     st.markdown("---")
     st.header("2. 專案資訊")
     with st.form("info"):
@@ -221,7 +183,8 @@ with st.sidebar:
     roc_year = check_date.year - 1911
     date_str = f"{roc_year}.{check_date.month:02d}.{check_date.day:02d}"
 
-if template_file:
+# 主畫面邏輯：只要 Session State 裡有樣板就可以操作，不需要每次都掛著上傳元件
+if st.session_state['saved_template']:
     st.header("3. 照片上傳 (最多 8 張)")
     files = st.file_uploader("選擇照片", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
@@ -246,7 +209,8 @@ if template_file:
                     "date": date_str, "check_item": p_item
                 }
                 try:
-                    doc = generate_fixed_report(template_file, ctx, photo_data)
+                    # 傳入儲存的樣板 Bytes
+                    doc = generate_fixed_report(st.session_state['saved_template'], ctx, photo_data)
                     bio = io.BytesIO()
                     doc.save(bio)
                     st.session_state['doc_buffer'] = bio.getvalue()
@@ -257,3 +221,5 @@ if template_file:
 
         if st.session_state['doc_buffer']:
             st.download_button("📥 下載 Word 檔", st.session_state['doc_buffer'], st.session_state['doc_name'], "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+else:
+    st.info("👈 請先在左側上傳 Word 樣板以開始使用。")
