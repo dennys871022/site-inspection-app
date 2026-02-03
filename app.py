@@ -3,52 +3,20 @@ from docx import Document
 from docx.shared import Cm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 from PIL import Image
 import io
 import datetime
 
-# --- 1. 核心工具函數 ---
+# --- 1. 基礎設定 ---
 
-def set_font_style(run, font_name='標楷體', size=12, bold=False):
-    """設定中英文字型 (Times New Roman + 標楷體)"""
+def set_font_style(run, font_name='標楷體', size=12):
+    """設定字型"""
     run.font.name = 'Times New Roman'
     run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
     run.font.size = Pt(size)
-    run.bold = bold
-
-def replace_text_in_tables(doc, context):
-    """替換全文件(含表格)內的文字變數"""
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    replace_paragraph_text(paragraph, context)
-    for paragraph in doc.paragraphs:
-        replace_paragraph_text(paragraph, context)
-
-def replace_paragraph_text(paragraph, context):
-    for key, value in context.items():
-        placeholder = f"{{{key}}}"
-        if placeholder in paragraph.text:
-            paragraph.text = paragraph.text.replace(placeholder, str(value))
-            for run in paragraph.runs:
-                set_font_style(run, size=12)
-
-def set_cell_border(cell, top=None, bottom=None, left=None, right=None, insideH=None, insideV=None):
-    """強制設定儲存格邊框"""
-    tc = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    for border_name, val in [("top", top), ("bottom", bottom), ("left", left), ("right", right)]:
-        if val:
-            edge = OxmlElement(f'w:{border_name}')
-            edge.set(qn('w:val'), val)
-            edge.set(qn('w:sz'), '4')
-            edge.set(qn('w:space'), '0')
-            edge.set(qn('w:color'), 'auto')
-            tcPr.append(edge)
 
 def compress_image(image_file, max_width=800):
+    """圖片壓縮與轉向處理"""
     img = Image.open(image_file)
     if img.mode == 'RGBA':
         img = img.convert('RGB')
@@ -66,108 +34,98 @@ def compress_image(image_file, max_width=800):
     img_byte_arr.seek(0)
     return img_byte_arr
 
-# --- 2. 關鍵修復：表格列增生邏輯 ---
+# --- 2. 核心功能：精準填空 ---
 
-def process_photo_table(doc, photo_data):
-    """找到含有 {photo_table} 的表格列，並在該處增生照片列"""
-    target_table = None
-    target_row_index = -1
-    
-    # 1. 尋找定位點
+def replace_text_content(doc, replacements):
+    """
+    通用文字替換：將 {key} 換成 value
+    適用於：工程名稱、位置、說明文字等
+    """
+    # 遍歷表格
     for table in doc.tables:
-        for i, row in enumerate(table.rows):
-            # 檢查整列文字
-            row_text = "".join([c.text for c in row.cells])
-            if "{photo_table}" in row_text:
-                target_table = table
-                target_row_index = i
-                break
-        if target_table:
-            break
-            
-    if not target_table:
-        st.warning("⚠️ 找不到 {photo_table} 定位點，請檢查 Word 樣板。")
-        return 
-        
-    # 2. 計算需要的總列數
-    total_photos = len(photo_data)
-    rows_needed = (total_photos + 1) // 2
-    
-    # 3. 準備第一列 (清除原本的定位字)
-    first_row = target_table.rows[target_row_index]
-    for cell in first_row.cells:
-        cell.text = ""
-        for p in cell.paragraphs: p.text = ""
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    replace_paragraph(paragraph, replacements)
+    # 遍歷一般段落
+    for paragraph in doc.paragraphs:
+        replace_paragraph(paragraph, replacements)
 
-    # 4. 開始填入照片
-    for r in range(rows_needed):
-        # 決定要填入哪一列
-        if r == 0:
-            current_row = first_row
-        else:
-            # 在表格最後新增一列 (會繼承表格寬度)
-            current_row = target_table.add_row()
-        
-        start_photo_idx = r * 2
-        
-        for col in range(2): # 左右兩欄
-            photo_idx = start_photo_idx + col
-            
-            # 防呆：確保格子存在
-            if col >= len(current_row.cells): continue
-                
-            cell = current_row.cells[col]
-            set_cell_border(cell, top="single", bottom="single", left="single", right="single")
-            
-            if photo_idx >= total_photos: continue 
-                
-            data = photo_data[photo_idx]
-            
-            # --- 內容填寫區 (這裡控制排版) ---
-            
-            # A. 圖片
-            p_img = cell.paragraphs[0]
-            p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            try:
-                run = p_img.add_run()
-                # 這裡設定圖片寬度，約 8.5cm 適合 A4 兩欄
-                run.add_picture(compress_image(data['file']), width=Cm(8.5))
-            except:
-                p_img.add_run("[圖片錯誤]")
-            
-            # B. 文字 (模仿你的範例格式)
-            p_info = cell.add_paragraph()
-            p_info.paragraph_format.space_before = Pt(4)
-            p_info.paragraph_format.space_after = Pt(2)
-            
-            # 第一行: 照片編號 + 日期 (中間用全形空白調整間距)
-            # 你的範例：照片編號：01              日期：115.02.03
-            text_line1 = f"照片編號：{data['no']:02d}　　　　　日期：{data['date_str']}\n"
-            run1 = p_info.add_run(text_line1)
-            set_font_style(run1, size=11)
-            
-            # 第二行: 說明
-            text_line2 = f"說明：{data['desc']}\n"
-            run2 = p_info.add_run(text_line2)
-            set_font_style(run2, size=11)
-            
-            # 第三行: 實測
-            text_line3 = f"實測：{data['result']}"
-            run3 = p_info.add_run(text_line3)
-            set_font_style(run3, size=11)
+def replace_paragraph(paragraph, replacements):
+    for key, value in replacements.items():
+        if key in paragraph.text:
+            # 這裡使用簡單替換，保留段落格式
+            if value is None: value = ""
+            paragraph.text = paragraph.text.replace(key, str(value))
+            # 重新設定字型 (因為替換後格式有時會跑掉)
+            for run in paragraph.runs:
+                set_font_style(run, size=11)
 
-# --- 3. 主程式邏輯 ---
+def replace_placeholder_with_image(doc, placeholder, image_stream):
+    """
+    找到 {img_X} 並替換成圖片
+    """
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if placeholder in paragraph.text:
+                        # 1. 清空佔位符文字
+                        paragraph.text = "" 
+                        # 2. 插入圖片
+                        run = paragraph.add_run()
+                        if image_stream:
+                            # 圖片寬度固定 8cm (配合 A4 兩欄)
+                            run.add_picture(image_stream, width=Cm(8.0))
+                        return # 找到一個就停，避免重複
 
-def generate_report(template_file, context, photo_data):
+# --- 3. 主流程 ---
+
+def generate_fixed_report(template_file, context, photo_data):
     doc = Document(template_file)
-    replace_text_in_tables(doc, context)
-    process_photo_table(doc, photo_data)
+    
+    # 1. 填入基本資料 (工程名稱等)
+    # 將 {key} 轉換為 {value}
+    text_replacements = {f"{{{k}}}": v for k, v in context.items()}
+    replace_text_content(doc, text_replacements)
+    
+    # 2. 填入照片與說明 (迴圈處理 1~8)
+    for i in range(1, 9): # 假設最多 8 張
+        img_key = f"{{img_{i}}}"   # 對應 Word 裡的 {img_1}
+        info_key = f"{{info_{i}}}" # 對應 Word 裡的 {info_1}
+        
+        # 檢查是否有這張照片
+        data_idx = i - 1
+        if data_idx < len(photo_data):
+            # 有資料：填入圖片與文字
+            data = photo_data[data_idx]
+            
+            # (A) 處理圖片
+            replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
+            
+            # (B) 處理文字 (組合成字串)
+            # 格式：
+            # 照片編號：01          日期：115.02.03
+            # 說明：xxx
+            # 實測：xxx
+            info_text = f"照片編號：{data['no']:02d}　　　　日期：{data['date_str']}\n"
+            info_text += f"說明：{data['desc']}\n"
+            info_text += f"實測：{data['result']}"
+            
+            # 使用文字替換功能填入
+            replace_text_content(doc, {info_key: info_text})
+            
+        else:
+            # 沒資料：清空佔位符 (留白)
+            replace_text_content(doc, {img_key: ""})
+            replace_text_content(doc, {info_key: ""})
+            
     return doc
 
-# --- 4. UI ---
+# --- 4. Streamlit UI ---
 
 st.set_page_config(page_title="自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表自動生成系統 (最終修復版)")
+st.title("🏗️ 工程自主檢查表 (定位點填空版)")
 
 if 'doc_buffer' not in st.session_state:
     st.session_state['doc_buffer'] = None
@@ -176,7 +134,7 @@ if 'doc_name' not in st.session_state:
 
 with st.sidebar:
     st.header("1. 上傳樣板")
-    st.info("請確保 Word 表格內留有一行 `{photo_table}`")
+    st.info("請確認 Word 表格內已預先填好 `{img_1}`...`{img_8}` 及 `{info_1}`...`{info_8}`")
     template_file = st.file_uploader("Word 樣板", type=['docx'])
     
     st.markdown("---")
@@ -194,14 +152,17 @@ with st.sidebar:
     date_str = f"{roc_year}.{check_date.month:02d}.{check_date.day:02d}"
 
 if template_file:
-    st.header("3. 照片上傳")
+    st.header("3. 照片上傳 (最多 8 張)")
     files = st.file_uploader("選擇照片", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
     photo_data = []
     if files:
         with st.form("photos"):
             cols = st.columns(2)
-            for i, f in enumerate(files):
+            # 限制處理最多 8 張，避免錯誤
+            process_files = files[:8]
+            
+            for i, f in enumerate(process_files):
                 with cols[i%2]:
                     st.image(f, width=200)
                     no = st.number_input(f"編號", min_value=1, value=i+1, key=f"n{i}")
@@ -216,7 +177,7 @@ if template_file:
                     "date": date_str, "check_item": p_item
                 }
                 try:
-                    doc = generate_report(template_file, ctx, photo_data)
+                    doc = generate_fixed_report(template_file, ctx, photo_data)
                     bio = io.BytesIO()
                     doc.save(bio)
                     st.session_state['doc_buffer'] = bio.getvalue()
