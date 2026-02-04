@@ -7,8 +7,7 @@ import io
 import datetime
 import os
 import zipfile
-import pandas as pd # 新增：用於讀取 Excel/CSV
-import json
+import pandas as pd
 
 # --- 0. 預設檢查標準 (內建資料庫) ---
 DEFAULT_CHECKS = {
@@ -158,52 +157,50 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
 
 # --- 4. Streamlit UI ---
 
-st.set_page_config(page_title="自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (資料庫版)")
+st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
+st.title("🏗️ 工程自主檢查表 (完全自定義版)")
 
-# Session State & Config Loading
+# Init
+if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = DEFAULT_CHECKS
 
-# 自動載入 template.docx
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# --- Sidebar: 設定與記憶 ---
+# Sidebar
 with st.sidebar:
-    st.header("1. 系統設定")
+    st.header("1. 樣板設定")
     if st.session_state['saved_template']:
-        st.success("✅ Word 樣板已就緒")
-    
+        st.success("✅ 樣板已載入")
+    else:
+        uploaded = st.file_uploader("上傳樣板", type=['docx'])
+        if uploaded:
+            st.session_state['saved_template'] = uploaded.getvalue()
+            st.rerun()
+            
     with st.expander("🛠️ 進階：管理檢查項目"):
-        st.info("您可以上傳 Excel 檔來擴充下拉選單。格式：A欄=類別, B欄=項目, C欄=結果")
-        uploaded_db = st.file_uploader("上傳檢查標準 (Excel/CSV)", type=['xlsx', 'csv'])
+        uploaded_db = st.file_uploader("上傳 Excel 標準", type=['xlsx', 'csv'])
         if uploaded_db:
             try:
                 if uploaded_db.name.endswith('csv'):
                     df = pd.read_csv(uploaded_db)
                 else:
                     df = pd.read_excel(uploaded_db)
-                
-                # 簡單解析：假設有 columns ["Category", "Item", "Result"]
-                # 若無標題，假設是 0, 1, 2
                 new_db = {}
                 for _, row in df.iterrows():
                     cat = str(row.iloc[0]).strip()
                     item = str(row.iloc[1]).strip()
                     res = str(row.iloc[2]).strip()
-                    
-                    if cat not in new_db:
-                        new_db[cat] = {"items": [], "results": []}
+                    if cat not in new_db: new_db[cat] = {"items": [], "results": []}
                     new_db[cat]["items"].append(item)
                     new_db[cat]["results"].append(res)
-                
                 st.session_state['checks_db'] = new_db
                 st.success("資料庫更新成功！")
-            except Exception as e:
-                st.error(f"讀取失敗: {e}")
+            except:
+                st.error("讀取失敗")
 
     st.markdown("---")
     st.header("2. 專案資訊")
@@ -213,10 +210,9 @@ with st.sidebar:
     p_loc = st.text_input("施作位置", "北棟 1F")
     base_date = st.date_input("日期", datetime.date.today())
 
-# --- Main Area ---
+# Main
 if st.session_state['saved_template']:
     
-    # 群組設定
     num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=1)
     all_groups_data = []
 
@@ -226,31 +222,33 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 選擇類別 (從資料庫讀取)
+        # 1. 選擇類別
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}")
         
-        # 2. 自動產生檔名需要的格式
-        # 民國年
+        # 2. 自檢項目名稱 (可自訂)
+        default_item_name = f"{selected_type}自主檢查"
+        g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", value=default_item_name, key=f"item_{g}")
+        
+        # 3. 日期與檔名預設值
         roc_year = base_date.year - 1911
         roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}" # 1150204
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
-        
-        # 預設自檢項目名稱 = 類別名稱
-        g_item = c2.text_input(f"自檢項目名稱", value=f"{selected_type}自主檢查", key=f"item_{g}")
         c3.text(f"日期: {date_display}")
+        
+        # --- 新增：檔名自定義 ---
+        # 預設檔名：1150204_拆除工程自主檢查
+        default_filename = f"{roc_date_str}_{g_item}"
+        file_name_custom = st.text_input("自定義檔名 (不含 .docx)", value=default_filename, key=f"fname_{g}")
 
-        # 3. 照片上傳
+        # 4. 照片上傳
         g_files = st.file_uploader(f"上傳照片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"file_{g}")
         
         if g_files:
             g_photos = []
-            
-            # 取得該類別的標準清單
             std_items = st.session_state['checks_db'][selected_type]["items"]
             std_results = st.session_state['checks_db'][selected_type]["results"]
             
-            # 編輯區
             for i in range(0, len(g_files), 2):
                 row_cols = st.columns(2)
                 for j in range(2):
@@ -266,31 +264,22 @@ if st.session_state['saved_template']:
                             st.caption(f"No. {no}")
                         
                         with input_col:
-                            # 下拉選單 (連動填寫)
-                            # 加一個空白選項
                             options = ["(請選擇...)"] + std_items
-                            
-                            # 嘗試智慧預選 (如果是第1張就選第1個標準)
-                            default_idx = 0
-                            if no <= len(std_items):
-                                default_idx = no 
-                            
+                            default_idx = no if no <= len(std_items) else 0
                             selected_opt = st.selectbox(
                                 "快速選擇", options, index=default_idx, 
                                 label_visibility="collapsed", key=f"sel_{g}_{no}"
                             )
                             
-                            # 決定填入的文字
+                            current_desc = ""
+                            current_res = ""
                             if selected_opt != "(請選擇...)":
                                 idx = std_items.index(selected_opt)
-                                fill_desc = std_items[idx]
-                                fill_res = std_results[idx]
-                            else:
-                                fill_desc = ""
-                                fill_res = ""
+                                current_desc = std_items[idx]
+                                current_res = std_results[idx]
                             
-                            d_val = st.text_input("說明", value=fill_desc, key=f"d_{g}_{no}")
-                            r_val = st.text_input("實測", value=fill_res, key=f"r_{g}_{no}")
+                            d_val = st.text_input("說明", value=current_desc, key=f"d_{g}_{no}")
+                            r_val = st.text_input("實測", value=current_res, key=f"r_{g}_{no}")
                             
                             g_photos.append({
                                 "file": file, "no": no, "date_str": date_display,
@@ -300,7 +289,7 @@ if st.session_state['saved_template']:
 
             all_groups_data.append({
                 "group_id": g+1,
-                "file_prefix": f"{roc_date_str}{selected_type}", # 檔名核心: 1150204拆除工程
+                "file_prefix": file_name_custom, # 使用自定義的檔名
                 "context": {
                     "project_name": p_name, "contractor": p_cont, 
                     "sub_contractor": p_sub, "location": p_loc, 
@@ -320,9 +309,8 @@ if st.session_state['saved_template']:
                 for group in all_groups_data:
                     photos = group['photos']
                     context = group['context']
-                    file_prefix = group['file_prefix']
+                    file_prefix = group['file_prefix'] # 取用自定義檔名
                     
-                    # 分頁處理 (每8張一頁)
                     for page_idx, i in enumerate(range(0, len(photos), 8)):
                         batch = photos[i : i+8]
                         start_no = i + 1
@@ -331,8 +319,8 @@ if st.session_state['saved_template']:
                         doc_io = io.BytesIO()
                         doc.save(doc_io)
                         
-                        # 檔名格式: 1150204拆除工程.docx (若有分頁則加 _1, _2)
-                        suffix = f"_{page_idx+1}" if len(photos) > 8 else ""
+                        # 檔名邏輯：若有多頁，加上 (1), (2)
+                        suffix = f"({page_idx+1})" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
             
