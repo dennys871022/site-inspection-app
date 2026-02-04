@@ -9,7 +9,7 @@ import os
 import zipfile
 import pandas as pd
 
-# --- 0. 終極內建資料庫 ---
+# --- 0. 終極內建資料庫 (完整收錄您的 PDF 內容) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -227,36 +227,41 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             replace_text_content(doc, {info_key: ""})
     return doc
 
-# --- 4. 智慧命名邏輯 ---
+# --- 4. 智慧命名邏輯 (核心) ---
 
-def generate_auto_names(selected_type, base_date):
+def generate_names(selected_type, base_date):
     """
-    根據選擇的工項，自動生成符合標準的名稱。
-    格式：[工項名稱][類型]自主檢查
-    檔名：[日期][工項名稱][類型]自主檢查
+    生成標準化的項目名稱與檔名
+    Input: "拆除工程-施工 (EA26)", date object
+    Output: "拆除工程施工自主檢查", "1150204拆除工程施工自主檢查"
     """
-    # 解析選單字串，例如 "拆除工程-施工 (EA26)"
-    # 取出 "拆除工程"
-    main_name = selected_type.split('-')[0]
+    # 1. 處理名稱前綴
+    # 移除括號代號 (EA26)
+    clean_type = selected_type.split(' (')[0] # "拆除工程-施工"
     
-    # 判斷後綴
+    # 分割工程與類型
+    parts = clean_type.split('-')
+    main_name = parts[0] # "拆除工程"
+    
+    # 決定後綴
     suffix = "自主檢查"
-    if "施工" in selected_type:
+    if "施工" in clean_type or "混凝土" in clean_type:
         suffix = "施工自主檢查"
-    elif "材料" in selected_type:
+    elif "材料" in clean_type:
         suffix = "材料進場自主檢查"
-    elif "有價廢料" in selected_type:
+    elif "有價廢料" in clean_type:
         suffix = "有價廢料清運自主檢查"
-    elif "混凝土" in selected_type:
-        # 特例處理
-        suffix = "施工自主檢查"
-        
+    
+    # 組合完整項目名稱 (不含日期)
+    # 例：拆除工程施工自主檢查
     full_item_name = f"{main_name}{suffix}"
     
-    # 日期字串 (民國年無分隔符)
+    # 2. 處理日期
     roc_year = base_date.year - 1911
     roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
     
+    # 3. 組合檔名
+    # 例：1150204拆除工程施工自主檢查
     file_name = f"{roc_date_str}{full_item_name}"
     
     return full_item_name, file_name
@@ -264,32 +269,52 @@ def generate_auto_names(selected_type, base_date):
 # --- 5. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (標準命名版)")
+st.title("🏗️ 工程自主檢查表 (日期連動版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
+if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
 
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# --- Callback ---
-def update_group_defaults(g_idx, base_date):
-    """類別或日期改變時，更新名稱"""
-    type_key = f"type_{g_idx}"
-    item_key = f"item_{g_idx}"
-    fname_key = f"fname_{g_idx}"
+# --- Callbacks ---
+
+def update_all_filenames():
+    """
+    當全域日期改變時，更新所有組別的檔名與日期顯示。
+    """
+    base_date = st.session_state['global_date']
+    num = st.session_state['num_groups']
     
-    selected_type = st.session_state[type_key]
+    for g in range(num):
+        type_key = f"type_{g}"
+        # 如果該組別還沒被建立(還沒render)，跳過
+        if type_key not in st.session_state:
+            continue
+            
+        selected_type = st.session_state[type_key]
+        item_name, file_name = generate_names(selected_type, base_date)
+        
+        # 更新狀態
+        st.session_state[f"item_{g}"] = item_name
+        st.session_state[f"fname_{g}"] = file_name
+
+def update_group_info(g_idx):
+    """
+    當某組的工項改變時，更新該組的名稱與檔名
+    """
+    base_date = st.session_state['global_date']
+    selected_type = st.session_state[f"type_{g_idx}"]
     
-    # 呼叫命名邏輯
-    item_name, file_name = generate_auto_names(selected_type, base_date)
+    item_name, file_name = generate_names(selected_type, base_date)
     
-    st.session_state[item_key] = item_name
-    st.session_state[fname_key] = file_name
+    st.session_state[f"item_{g_idx}"] = item_name
+    st.session_state[f"fname_{g_idx}"] = file_name
 
 def update_photo_defaults(g_idx, p_no):
     """照片選單改變時，更新說明"""
@@ -349,13 +374,25 @@ with st.sidebar:
     p_sub = st.text_input("協力廠商", "川峻工程有限公司")
     p_loc = st.text_input("施作位置", "北棟 1F")
     
-    # 日期選擇 (綁定 Rerun，讓所有組別檔名自動更新)
-    base_date = st.date_input("日期", datetime.date.today())
+    # 日期選擇 (關鍵：綁定 on_change)
+    base_date = st.date_input(
+        "日期", 
+        datetime.date.today(),
+        key='global_date',
+        on_change=update_all_filenames
+    )
 
 # --- Main ---
 if st.session_state['saved_template']:
     
-    num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=1)
+    # 這裡使用 session_state 來記錄組數，避免重整後歸零
+    num_groups = st.number_input(
+        "本次產生幾組檢查表？", 
+        min_value=1, value=st.session_state['num_groups'],
+        key='num_groups_input'
+    )
+    st.session_state['num_groups'] = num_groups
+    
     all_groups_data = []
 
     for g in range(num_groups):
@@ -364,19 +401,19 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 選擇工項
+        # 1. 選擇工項 (綁定 on_change)
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(
             f"選擇檢查工項", 
             db_options, 
             key=f"type_{g}",
-            on_change=update_group_defaults,
-            args=(g, base_date)
+            on_change=update_group_info,
+            args=(g,)
         )
         
-        # 初次載入或重新整理時，確保檔名正確
+        # 確保初始化 (第一次執行時手動觸發一次命名)
         if f"item_{g}" not in st.session_state:
-            update_group_defaults(g, base_date)
+            update_group_info(g)
             
         # 2. 自動產生的欄位
         g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", key=f"item_{g}")
@@ -412,6 +449,7 @@ if st.session_state['saved_template']:
                             options = ["(請選擇...)"] + std_items
                             def_idx = no if no <= len(std_items) else 0
                             
+                            # 初始化
                             if f"d_{g}_{no}" not in st.session_state:
                                 st.session_state[f"d_{g}_{no}"] = ""
                                 st.session_state[f"r_{g}_{no}"] = ""
@@ -424,6 +462,7 @@ if st.session_state['saved_template']:
                                 args=(g, no)
                             )
                             
+                            # 初次載入自動填
                             if st.session_state[f"d_{g}_{no}"] == "" and selected_opt != "(請選擇...)":
                                 update_photo_defaults(g, no)
 
@@ -466,7 +505,7 @@ if st.session_state['saved_template']:
                         doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
                         doc_io = io.BytesIO()
                         doc.save(doc_io)
-                        suffix = f"_{page_idx+1}" if len(photos) > 8 else ""
+                        suffix = f"({page_idx+1})" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
             
