@@ -9,7 +9,7 @@ import os
 import zipfile
 import pandas as pd
 
-# --- 0. 終極內建資料庫 (完整收錄您的 PDF 內容) ---
+# --- 0. 終極內建資料庫 ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -108,7 +108,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 1. 樣式複製核心 ---
+# --- 1. 樣式與影像處理 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -159,7 +159,7 @@ def compress_image(image_file, max_width=800):
     img_byte_arr.seek(0)
     return img_byte_arr
 
-# --- 2. 替換邏輯 ---
+# --- 2. 替換邏輯 (純淨樣式) ---
 
 def replace_text_content(doc, replacements):
     for table in doc.tables:
@@ -215,6 +215,7 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
             
+            # 日期前 6 個全形空白
             spacer = "\u3000" * 6 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
@@ -226,42 +227,72 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             replace_text_content(doc, {info_key: ""})
     return doc
 
-# --- 4. Streamlit UI (連動功能版) ---
+# --- 4. 智慧命名邏輯 ---
+
+def generate_auto_names(selected_type, base_date):
+    """
+    根據選擇的工項，自動生成符合標準的名稱。
+    格式：[工項名稱][類型]自主檢查
+    檔名：[日期][工項名稱][類型]自主檢查
+    """
+    # 解析選單字串，例如 "拆除工程-施工 (EA26)"
+    # 取出 "拆除工程"
+    main_name = selected_type.split('-')[0]
+    
+    # 判斷後綴
+    suffix = "自主檢查"
+    if "施工" in selected_type:
+        suffix = "施工自主檢查"
+    elif "材料" in selected_type:
+        suffix = "材料進場自主檢查"
+    elif "有價廢料" in selected_type:
+        suffix = "有價廢料清運自主檢查"
+    elif "混凝土" in selected_type:
+        # 特例處理
+        suffix = "施工自主檢查"
+        
+    full_item_name = f"{main_name}{suffix}"
+    
+    # 日期字串 (民國年無分隔符)
+    roc_year = base_date.year - 1911
+    roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
+    
+    file_name = f"{roc_date_str}{full_item_name}"
+    
+    return full_item_name, file_name
+
+# --- 5. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (全自動連動版)")
+st.title("🏗️ 工程自主檢查表 (標準命名版)")
 
-# Init Session State
+# Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 
-# 自動載入樣板
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# --- Callback Functions (連動核心) ---
-
+# --- Callback ---
 def update_group_defaults(g_idx, base_date):
-    """當選擇類別改變時，強制更新該組的項目名稱與檔名"""
+    """類別或日期改變時，更新名稱"""
     type_key = f"type_{g_idx}"
     item_key = f"item_{g_idx}"
     fname_key = f"fname_{g_idx}"
     
     selected_type = st.session_state[type_key]
     
-    # 計算日期字串
-    roc_year = base_date.year - 1911
-    roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
+    # 呼叫命名邏輯
+    item_name, file_name = generate_auto_names(selected_type, base_date)
     
-    # 這裡就是您要的：類別一變，名稱跟檔名馬上跟著變
-    st.session_state[item_key] = f"{selected_type.split('-')[0]}自主檢查"
-    st.session_state[fname_key] = f"{roc_date_str}_{selected_type.split('-')[0]}"
+    st.session_state[item_key] = item_name
+    st.session_state[fname_key] = file_name
 
 def update_photo_defaults(g_idx, p_no):
-    """當照片的選單改變時，強制更新說明與實測"""
+    """照片選單改變時，更新說明"""
     sel_key = f"sel_{g_idx}_{p_no}"
     desc_key = f"d_{g_idx}_{p_no}"
     res_key = f"r_{g_idx}_{p_no}"
@@ -271,10 +302,8 @@ def update_photo_defaults(g_idx, p_no):
     current_type = st.session_state[type_key]
     
     if selected_opt != "(請選擇...)":
-        # 查表
         items = st.session_state['checks_db'][current_type]["items"]
         results = st.session_state['checks_db'][current_type]["results"]
-        
         if selected_opt in items:
             idx = items.index(selected_opt)
             st.session_state[desc_key] = items[idx]
@@ -319,6 +348,8 @@ with st.sidebar:
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
     p_sub = st.text_input("協力廠商", "川峻工程有限公司")
     p_loc = st.text_input("施作位置", "北棟 1F")
+    
+    # 日期選擇 (綁定 Rerun，讓所有組別檔名自動更新)
     base_date = st.date_input("日期", datetime.date.today())
 
 # --- Main ---
@@ -333,30 +364,29 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 類別選擇 (綁定 Callback)
+        # 1. 選擇工項
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(
             f"選擇檢查工項", 
             db_options, 
             key=f"type_{g}",
-            on_change=update_group_defaults, # 關鍵：改變時觸發更新
+            on_change=update_group_defaults,
             args=(g, base_date)
         )
         
-        # 2. 自動更新的欄位 (這裡不再給 default value，因為由 callback 控制)
-        # 初始化 key 如果不存在
+        # 初次載入或重新整理時，確保檔名正確
         if f"item_{g}" not in st.session_state:
-            update_group_defaults(g, base_date) # 初次執行手動觸發一次
+            update_group_defaults(g, base_date)
             
+        # 2. 自動產生的欄位
         g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", key=f"item_{g}")
         
-        # 日期顯示
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
         
         # 3. 檔名自定義
-        file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
+        file_name_custom = st.text_input("自定義檔名 (下載時使用)", key=f"fname_{g}")
 
         # 4. 照片上傳
         g_files = st.file_uploader(f"上傳照片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"file_{g}")
@@ -379,12 +409,9 @@ if st.session_state['saved_template']:
                             st.caption(f"No. {no}")
                         
                         with input_col:
-                            # 下拉選單 (綁定 Callback)
                             options = ["(請選擇...)"] + std_items
-                            # 預設選單邏輯
                             def_idx = no if no <= len(std_items) else 0
                             
-                            # 初始化 keys
                             if f"d_{g}_{no}" not in st.session_state:
                                 st.session_state[f"d_{g}_{no}"] = ""
                                 st.session_state[f"r_{g}_{no}"] = ""
@@ -393,11 +420,10 @@ if st.session_state['saved_template']:
                                 "快速選擇", options, index=def_idx, 
                                 label_visibility="collapsed", 
                                 key=f"sel_{g}_{no}",
-                                on_change=update_photo_defaults, # 關鍵：連動更新
+                                on_change=update_photo_defaults,
                                 args=(g, no)
                             )
                             
-                            # 第一次載入時，如果已有預選，手動觸發一次填寫
                             if st.session_state[f"d_{g}_{no}"] == "" and selected_opt != "(請選擇...)":
                                 update_photo_defaults(g, no)
 
