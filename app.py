@@ -7,88 +7,123 @@ import io
 import datetime
 import os
 import zipfile
-import pandas as pd
 
-# --- 0. 預設檢查標準 (已根據您提供的 PDF EA26, EA53, EB26 建立) ---
-# 這裡就是系統的「大腦」，我已經幫您把資料 Key 好了
-DEFAULT_CHECKS = {
-    "拆除工程 (EA26)": {
+# --- 0. 終極內建資料庫 (基於您提供的所有 PDF) ---
+CHECKS_DB = {
+    "拆除工程-施工 (EA26)": {
         "items": [
-            "防塵作為", 
-            "降噪作為", 
-            "構造物拆除順序",
-            "保留構件保護", 
-            "拆除物分類", 
+            "防護措施:公共管線及環境保護",
+            "安全監測:初始值測量",
+            "防塵作為:灑水或防塵網",
+            "降噪作為:低噪音機具",
+            "拆除順序:由上而下",
+            "保留構件:記號保護",
+            "拆除物分類:回收/不可回收/有價",
             "車輛輪胎清潔",
-            "安全監測 (傾斜/沉陷)", 
-            "地坪整平", 
+            "安全監測數據查核",
+            "地坪整平清潔",
             "廢棄物清運"
         ],
         "results": [
-            "灑水或防塵網設置完成", 
-            "使用低噪音型機具、非衝擊式拆除工法", 
-            "由上而下順序拆除",
-            "已進行記號、保護並放置指定位置", 
-            "依可回收、不可回收及有價物分類", 
-            "輪胎已清潔，無帶污泥出工區",
-            "傾斜計<1/937.5，沉陷點<2cm", 
-            "地坪平整清潔", 
-            "依據核定之計畫書執行清運"
+            "已完成相關防護措施，管線已封閉/遷移",
+            "已完成初始值測量及設置",
+            "現場已設置灑水或防塵網",
+            "使用低噪音機具、非衝擊式工法",
+            "依施工規劃由上而下拆除",
+            "保留構件已標示並保護",
+            "已依類別分類置放",
+            "輪胎已清潔，無帶污泥出場",
+            "傾斜計<1/937.5，沉陷點<2cm",
+            "地坪已平整清潔",
+            "依核定計畫書執行清運"
         ]
     },
-    "微型樁工程 (EA53)": {
+    "拆除工程-有價廢料 (EB26)": {
         "items": [
-            "開挖前置作業", 
-            "樁心檢測", 
-            "鑽掘垂直度",
-            "鑽掘尺寸 (深度/樁徑)", 
-            "鑽掘間距", 
-            "水泥漿拌合比", 
-            "注漿作業", 
-            "鋼管吊放", 
-            "廢漿清除",
-            "樁頂劣質打石",
-            "帽梁放樣",
-            "帽梁鋼筋綁紮"
+            "廢鋼筋載運", "銅線/製品載運", "電線電纜(含皮)載運",
+            "型鋼載運", "鋁料載運", "載運車輛資訊", "重量查核"
         ],
         "results": [
-            "確認開挖區域無埋設地下管線", 
-            "樁心偏差 ≦3cm", 
-            "TYPE I: 0-5° / TYPE II: 5~20°",
-            "深度L≧16m; 樁徑ψ≧15cm", 
-            "間距@60cm, 交錯施工", 
-            "水灰比 W/C=1:1", 
-            "單支澆置時間≦10min，注漿至帽梁底部", 
-            "鋼管長度 L=16m; 間隔器@2m", 
-            "已挖掘清除硬固廢漿",
-            "注漿超出設定之高程打石清除",
-            "誤差 -6mm~+13mm",
-            "主筋#6-4支, 箍筋#3@20cm"
+            "載運廢鋼筋 * 1 車", "載運銅製品 * 1 車", "載運電纜 * 1 車",
+            "載運型鋼 * 1 車", "載運鋁料 * 1 車",
+            "車號：__________", "總重:____kg / 淨重:____kg"
         ]
     },
-    "有價廢料載運 (EB26)": {
+    "微型樁工程-施工 (EA53)": {
         "items": [
-            "廢鋼筋載運",
-            "銅線/銅製品載運",
-            "電線電纜(裹外皮)載運",
-            "型鋼載運",
-            "鋁料載運",
-            "載運車輛資訊",
-            "重量查核"
+            "開挖前置:管線確認", "樁心檢測", "鑽掘垂直度",
+            "鑽掘深度與樁徑", "鑽掘間距", "水泥漿拌合比",
+            "注漿作業", "鋼管吊放安裝", "廢漿清除",
+            "樁頂劣質打石", "帽梁鋼筋綁紮", "帽梁灌漿"
         ],
         "results": [
-            "載運廢鋼筋，數量：_____ 車",
-            "載運銅製品，數量：_____ 車",
-            "載運電纜，數量：_____ 車",
-            "載運型鋼，數量：_____ 車",
-            "載運鋁料，數量：_____ 車",
-            "車號：__________",
-            "總重:____kg / 空車:____kg / 淨重:____kg"
+            "確認無地下管線干擾", "樁心偏差 ≦3cm", "垂直度符合規定 (0-5度)",
+            "深度≧16m; 樁徑≧15cm", "間距@60cm, 交錯施工", "水灰比 W/C=1:1",
+            "時間≦10min，注漿至帽梁底部", "長度16m; 間隔器@2m", "已清除硬固廢漿",
+            "劣質混凝土已打除", "主筋#6-4支, 箍筋#3@20cm", "強度 fc'=210kgf/cm2"
+        ]
+    },
+    "排樁工程-施工 (EA54)": {
+        "items": [
+            "樁心定位檢測", "預壘樁鑽掘(長度/直徑)", "鋼筋籠製作(主筋/箍筋)",
+            "鋼筋籠搭接與間隔", "水泥砂漿試體製作", "預壘樁灌漿高程",
+            "微型樁鑽掘(垂直/深度)", "微型樁注漿/鋼管", "壓梁鋼筋綁紮", "壓梁混凝土澆置"
+        ],
+        "results": [
+            "偏差 ±2cm 以內", "長度/直徑符合設計圖說", "主筋#8/#7; 箍筋#4 符合規定",
+            "搭接≧8cm; 間隔片@200cm", "已製作方塊試體", "高程≧樁長; 壓力≧2.1kgf/cm2",
+            "垂直度±5度; 深度≧7m", "水灰比1:1; 鋼管L=7m", "主筋#6; 箍筋#4@15cm", "強度 210kgf/cm2, 坍度20±4cm"
+        ]
+    },
+    "假設工程-施工 (EA51)": {
+        "items": [
+            "放樣", "全阻式圍籬組立", "半阻式圍籬組立", "防溢座施作",
+            "出入口地坪(鋼筋/澆置)", "大門安裝(10M/6M)", "安全走廊",
+            "警示燈設置", "洗車台尺寸檢查", "洗車台設備安裝", "圍籬綠化維護"
+        ],
+        "results": [
+            "依施工圖說放樣", "立柱/槽鋼間距符合規定", "立柱間距符合規定", "混凝土210kgf/cm2",
+            "厚度20cm; 雙層雙向#4@10cm", "尺寸及埋入深度符合規定", "高300寬150cm",
+            "間距符合規定", "500x522cm; 沉沙池深170cm", "噴水頭間距50cm", "存活率90%以上"
+        ]
+    },
+    "車道拓寬工程 (EA52)": {
+        "items": [
+            "碎石級配舖設", "鋼筋綁紮", "模板組立",
+            "混凝土澆置(結構)", "粉刷面清潔", "基準灰誌製作",
+            "馬賽克磚舖貼", "瀝青混凝土舖設"
+        ],
+        "results": [
+            "級配高度 20cm", "箍筋#4@20cm; 保護層4cm", "牆厚20cm; 垂直度±13mm",
+            "強度 210kgf/cm2", "無殘餘雜物、凸出物", "間距不大於1M",
+            "顏色與樣板相同", "密級配，無汙損浮起"
+        ]
+    },
+    "混凝土工程 (共用)": {
+        "items": [
+            "照明與雨天防護", "澆置前清潔濕潤", "模板振動器",
+            "澆置時間控制", "坍度/流度檢查", "溫度檢查",
+            "氯離子含量", "試體取樣", "振動搗實", "養護作業"
+        ],
+        "results": [
+            "照明充足，備有防雨材", "垃圾清除，模板濕潤", "備有至少二具",
+            "拌合至澆置90分鐘內", "符合設計 (如 18±4cm)", "13~32度C",
+            "小於 0.15 kg/m3", "每100m3取樣1組", "間距<50cm; 每次5-10秒", "灑水或覆蓋養護"
+        ]
+    },
+    "材料檢查 (綜合)": {
+        "items": [
+            "證明文件查核", "外觀形狀檢查", "工地放置檢查",
+            "規格尺寸量測", "取樣試驗"
+        ],
+        "results": [
+            "出廠證明/檢驗紀錄齊全", "無碰撞變形、破損、裂痕", "分類堆置，底部墊高",
+            "符合契約規範及訂貨規格", "依規範取樣/不取樣"
         ]
     }
 }
 
-# --- 1. 核心工具 ---
+# --- 1. 樣式複製核心 (保持完美) ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -138,6 +173,8 @@ def compress_image(image_file, max_width=800):
     img.save(img_byte_arr, format='JPEG', quality=75)
     img_byte_arr.seek(0)
     return img_byte_arr
+
+# --- 2. 替換邏輯 ---
 
 def replace_text_content(doc, replacements):
     for table in doc.tables:
@@ -193,7 +230,7 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
             
-            # 使用 6 個全形空白
+            # 日期前 6 個全形空白
             spacer = "\u3000" * 6 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
@@ -208,12 +245,11 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
 # --- 4. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (內建標準版)")
+st.title("🏗️ 工程自主檢查表 (終極內建資料庫版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
-if 'checks_db' not in st.session_state: st.session_state['checks_db'] = DEFAULT_CHECKS
 
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
@@ -231,28 +267,6 @@ with st.sidebar:
             st.session_state['saved_template'] = uploaded.getvalue()
             st.rerun()
             
-    with st.expander("🛠️ 擴充資料庫 (Excel)"):
-        st.info("若有新的檢查表，請上傳 Excel (A:類別, B:項目, C:標準)")
-        uploaded_db = st.file_uploader("上傳 Excel", type=['xlsx', 'csv'])
-        if uploaded_db:
-            try:
-                if uploaded_db.name.endswith('csv'):
-                    df = pd.read_csv(uploaded_db)
-                else:
-                    df = pd.read_excel(uploaded_db)
-                new_db = st.session_state['checks_db'].copy()
-                for _, row in df.iterrows():
-                    cat = str(row.iloc[0]).strip()
-                    item = str(row.iloc[1]).strip()
-                    res = str(row.iloc[2]).strip()
-                    if cat not in new_db: new_db[cat] = {"items": [], "results": []}
-                    new_db[cat]["items"].append(item)
-                    new_db[cat]["results"].append(res)
-                st.session_state['checks_db'] = new_db
-                st.success("資料庫擴充成功！")
-            except:
-                st.error("讀取失敗")
-
     st.markdown("---")
     st.header("2. 專案資訊")
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
@@ -273,20 +287,20 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 選擇類別
-        db_options = list(st.session_state['checks_db'].keys())
+        # 1. 選擇類別 (直接從內建資料庫讀取)
+        db_options = list(CHECKS_DB.keys())
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}")
         
-        # 2. 自動產生檔名需要的格式
+        # 2. 自動產生檔名
         roc_year = base_date.year - 1911
         roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         
-        # 自檢項目名稱 (預設為工項名稱)
+        # 自檢項目名稱 (預設為類別名稱)
         g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", value=f"{selected_type}", key=f"item_{g}")
         
         # 檔名自定義
-        default_filename = f"{roc_date_str}{selected_type}"
+        default_filename = f"{roc_date_str}_{selected_type.split(' ')[0]}"
         file_name_custom = c3.text_input("自定義檔名", value=default_filename, key=f"fname_{g}")
 
         # 3. 照片上傳
@@ -295,8 +309,8 @@ if st.session_state['saved_template']:
         if g_files:
             g_photos = []
             
-            std_items = st.session_state['checks_db'][selected_type]["items"]
-            std_results = st.session_state['checks_db'][selected_type]["results"]
+            std_items = CHECKS_DB[selected_type]["items"]
+            std_results = CHECKS_DB[selected_type]["results"]
             
             # 編輯區
             for i in range(0, len(g_files), 2):
@@ -315,7 +329,7 @@ if st.session_state['saved_template']:
                         
                         with input_col:
                             options = ["(請選擇...)"] + std_items
-                            # 智慧預選：如果照片編號對應得到項目，就預選
+                            # 智慧預選
                             default_idx = no if no <= len(std_items) else 0
                             
                             selected_opt = st.selectbox(
