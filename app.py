@@ -7,54 +7,40 @@ import io
 import datetime
 import os
 import zipfile
+import pandas as pd
 
-# --- 0. 終極內建資料庫 (基於您提供的所有 PDF) ---
+# --- 0. 終極內建資料庫 (完整收錄您的 PDF 內容) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
-            "防護措施:公共管線及環境保護",
-            "安全監測:初始值測量",
-            "防塵作為:灑水或防塵網",
-            "降噪作為:低噪音機具",
-            "拆除順序:由上而下",
-            "保留構件:記號保護",
-            "拆除物分類:回收/不可回收/有價",
-            "車輛輪胎清潔",
-            "安全監測數據查核",
-            "地坪整平清潔",
-            "廢棄物清運"
+            "防護措施:公共管線及環境保護", "安全監測:初始值測量", "防塵作為:灑水或防塵網",
+            "降噪作為:低噪音機具", "構造物拆除順序:由上而下", "保留構件:記號保護",
+            "拆除物分類:回收/不可回收/有價", "車輛輪胎清潔", "安全監測數據查核",
+            "地坪整平清潔", "廢棄物清運"
         ],
         "results": [
-            "已完成相關防護措施，管線已封閉/遷移",
-            "已完成初始值測量及設置",
-            "現場已設置灑水或防塵網",
-            "使用低噪音機具、非衝擊式工法",
-            "依施工規劃由上而下拆除",
-            "保留構件已標示並保護",
-            "已依類別分類置放",
-            "輪胎已清潔，無帶污泥出場",
-            "傾斜計<1/937.5，沉陷點<2cm",
-            "地坪已平整清潔",
-            "依核定計畫書執行清運"
+            "已完成相關防護措施，管線已封閉/遷移", "已完成初始值測量及設置", "現場已設置灑水或防塵網",
+            "使用低噪音機具、非衝擊式工法", "依施工規劃由上而下拆除", "保留構件已標示並保護",
+            "已依類別分類置放", "輪胎已清潔，無帶污泥出場", "傾斜計<1/937.5，沉陷點<2cm",
+            "地坪已平整清潔", "依核定計畫書執行清運"
         ]
     },
     "拆除工程-有價廢料 (EB26)": {
         "items": [
-            "廢鋼筋載運", "銅線/製品載運", "電線電纜(含皮)載運",
-            "型鋼載運", "鋁料載運", "載運車輛資訊", "重量查核"
+            "廢鋼筋載運", "銅線/製品載運", "電線電纜(含皮)載運", "型鋼載運", 
+            "鋁料載運", "載運車輛資訊", "重量查核"
         ],
         "results": [
-            "載運廢鋼筋 * 1 車", "載運銅製品 * 1 車", "載運電纜 * 1 車",
-            "載運型鋼 * 1 車", "載運鋁料 * 1 車",
-            "車號：__________", "總重:____kg / 淨重:____kg"
+            "載運廢鋼筋 * 1 車", "載運銅製品 * 1 車", "載運電纜 * 1 車", "載運型鋼 * 1 車", 
+            "載運鋁料 * 1 車", "車號：__________", "總重:____kg / 淨重:____kg"
         ]
     },
     "微型樁工程-施工 (EA53)": {
         "items": [
-            "開挖前置:管線確認", "樁心檢測", "鑽掘垂直度",
-            "鑽掘深度與樁徑", "鑽掘間距", "水泥漿拌合比",
-            "注漿作業", "鋼管吊放安裝", "廢漿清除",
-            "樁頂劣質打石", "帽梁鋼筋綁紮", "帽梁灌漿"
+            "開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)",
+            "鑽掘尺寸 (深度/樁徑)", "鑽掘間距 (@60cm)", "水泥漿拌合比 (1:1)",
+            "注漿作業 (≦10min)", "鋼管吊放安裝", "廢漿清除", "樁頂劣質打石", 
+            "帽梁鋼筋綁紮", "帽梁灌漿"
         ],
         "results": [
             "確認無地下管線干擾", "樁心偏差 ≦3cm", "垂直度符合規定 (0-5度)",
@@ -62,6 +48,10 @@ CHECKS_DB = {
             "時間≦10min，注漿至帽梁底部", "長度16m; 間隔器@2m", "已清除硬固廢漿",
             "劣質混凝土已打除", "主筋#6-4支, 箍筋#3@20cm", "強度 fc'=210kgf/cm2"
         ]
+    },
+    "微型樁工程-材料 (EB53)": {
+        "items": ["證明文件", "規格尺寸", "外觀形狀", "工地放置", "取樣試驗"],
+        "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範", "無碰撞變形", "分類堆置/標示", "依規範取樣"]
     },
     "排樁工程-施工 (EA54)": {
         "items": [
@@ -75,55 +65,50 @@ CHECKS_DB = {
             "垂直度±5度; 深度≧7m", "水灰比1:1; 鋼管L=7m", "主筋#6; 箍筋#4@15cm", "強度 210kgf/cm2, 坍度20±4cm"
         ]
     },
+    "排樁工程-材料 (EB54)": {
+        "items": ["證明文件", "規格尺寸", "外觀形狀", "工地放置", "取樣試驗"],
+        "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範", "無碰撞變形", "分類堆置/標示", "依規範取樣"]
+    },
     "假設工程-施工 (EA51)": {
         "items": [
             "放樣", "全阻式圍籬組立", "半阻式圍籬組立", "防溢座施作",
-            "出入口地坪(鋼筋/澆置)", "大門安裝(10M/6M)", "安全走廊",
-            "警示燈設置", "洗車台尺寸檢查", "洗車台設備安裝", "圍籬綠化維護"
+            "出入口地坪(鋼筋/澆置)", "大門安裝", "安全走廊", "警示燈設置",
+            "洗車台尺寸檢查", "圍籬綠化維護"
         ],
         "results": [
-            "依施工圖說放樣", "立柱/槽鋼間距符合規定", "立柱間距符合規定", "混凝土210kgf/cm2",
+            "依施工圖說放樣", "間距/埋入深度符合規定", "間距/埋入深度符合規定", "混凝土210kgf/cm2",
             "厚度20cm; 雙層雙向#4@10cm", "尺寸及埋入深度符合規定", "高300寬150cm",
-            "間距符合規定", "500x522cm; 沉沙池深170cm", "噴水頭間距50cm", "存活率90%以上"
+            "間距符合規定", "500x522cm; 沉沙池深170cm", "存活率90%以上"
         ]
+    },
+    "假設工程-材料 (EB51)": {
+        "items": ["證明文件", "外觀形狀", "工地放置", "預鑄水溝尺寸"],
+        "results": ["出廠證明/檢驗紀錄齊全", "無碰撞變形、破損", "分類堆置/標示", "內溝寬30±5cm, 深40±5cm"]
     },
     "車道拓寬工程 (EA52)": {
         "items": [
-            "碎石級配舖設", "鋼筋綁紮", "模板組立",
-            "混凝土澆置(結構)", "粉刷面清潔", "基準灰誌製作",
-            "馬賽克磚舖貼", "瀝青混凝土舖設"
+            "碎石級配舖設", "鋼筋綁紮", "模板組立", "混凝土澆置(結構)",
+            "粉刷面清潔", "基準灰誌製作", "馬賽克磚舖貼", "瀝青混凝土舖設"
         ],
         "results": [
-            "級配高度 20cm", "箍筋#4@20cm; 保護層4cm", "牆厚20cm; 垂直度±13mm",
-            "強度 210kgf/cm2", "無殘餘雜物、凸出物", "間距不大於1M",
-            "顏色與樣板相同", "密級配，無汙損浮起"
+            "級配高度 20cm", "箍筋#4@20cm; 保護層4cm", "牆厚20cm; 垂直度±13mm", "強度 210kgf/cm2",
+            "無殘餘雜物、凸出物", "間距不大於1M", "顏色與樣板相同", "密級配，無汙損浮起"
         ]
     },
     "混凝土工程 (共用)": {
         "items": [
-            "照明與雨天防護", "澆置前清潔濕潤", "模板振動器",
-            "澆置時間控制", "坍度/流度檢查", "溫度檢查",
-            "氯離子含量", "試體取樣", "振動搗實", "養護作業"
+            "照明與雨天防護", "澆置前清潔濕潤", "模板振動器", "澆置時間控制",
+            "坍度/流度檢查", "溫度檢查", "氯離子含量", "試體取樣", "振動搗實", "養護作業"
         ],
         "results": [
-            "照明充足，備有防雨材", "垃圾清除，模板濕潤", "備有至少二具",
-            "拌合至澆置90分鐘內", "符合設計 (如 18±4cm)", "13~32度C",
-            "小於 0.15 kg/m3", "每100m3取樣1組", "間距<50cm; 每次5-10秒", "灑水或覆蓋養護"
-        ]
-    },
-    "材料檢查 (綜合)": {
-        "items": [
-            "證明文件查核", "外觀形狀檢查", "工地放置檢查",
-            "規格尺寸量測", "取樣試驗"
-        ],
-        "results": [
-            "出廠證明/檢驗紀錄齊全", "無碰撞變形、破損、裂痕", "分類堆置，底部墊高",
-            "符合契約規範及訂貨規格", "依規範取樣/不取樣"
+            "照明充足，備有防雨材", "垃圾清除，模板濕潤", "備有至少二具", "拌合至澆置90分鐘內",
+            "符合設計 (如 18±4cm)", "13~32度C", "小於 0.15 kg/m3", "每100m3取樣1組",
+            "間距<50cm; 每次5-10秒", "灑水或覆蓋養護"
         ]
     }
 }
 
-# --- 1. 樣式複製核心 (保持完美) ---
+# --- 1. 樣式複製核心 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -230,7 +215,6 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
             
-            # 日期前 6 個全形空白
             spacer = "\u3000" * 6 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
@@ -242,21 +226,64 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             replace_text_content(doc, {info_key: ""})
     return doc
 
-# --- 4. Streamlit UI ---
+# --- 4. Streamlit UI (連動功能版) ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (終極內建資料庫版)")
+st.title("🏗️ 工程自主檢查表 (全自動連動版)")
 
-# Init
+# Init Session State
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
+if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 
+# 自動載入樣板
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# Sidebar
+# --- Callback Functions (連動核心) ---
+
+def update_group_defaults(g_idx, base_date):
+    """當選擇類別改變時，強制更新該組的項目名稱與檔名"""
+    type_key = f"type_{g_idx}"
+    item_key = f"item_{g_idx}"
+    fname_key = f"fname_{g_idx}"
+    
+    selected_type = st.session_state[type_key]
+    
+    # 計算日期字串
+    roc_year = base_date.year - 1911
+    roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
+    
+    # 這裡就是您要的：類別一變，名稱跟檔名馬上跟著變
+    st.session_state[item_key] = f"{selected_type.split('-')[0]}自主檢查"
+    st.session_state[fname_key] = f"{roc_date_str}_{selected_type.split('-')[0]}"
+
+def update_photo_defaults(g_idx, p_no):
+    """當照片的選單改變時，強制更新說明與實測"""
+    sel_key = f"sel_{g_idx}_{p_no}"
+    desc_key = f"d_{g_idx}_{p_no}"
+    res_key = f"r_{g_idx}_{p_no}"
+    type_key = f"type_{g_idx}"
+    
+    selected_opt = st.session_state[sel_key]
+    current_type = st.session_state[type_key]
+    
+    if selected_opt != "(請選擇...)":
+        # 查表
+        items = st.session_state['checks_db'][current_type]["items"]
+        results = st.session_state['checks_db'][current_type]["results"]
+        
+        if selected_opt in items:
+            idx = items.index(selected_opt)
+            st.session_state[desc_key] = items[idx]
+            st.session_state[res_key] = results[idx]
+    else:
+        st.session_state[desc_key] = ""
+        st.session_state[res_key] = ""
+
+# --- Sidebar ---
 with st.sidebar:
     st.header("1. 樣板設定")
     if st.session_state['saved_template']:
@@ -267,6 +294,25 @@ with st.sidebar:
             st.session_state['saved_template'] = uploaded.getvalue()
             st.rerun()
             
+    with st.expander("🛠️ 擴充資料庫"):
+        uploaded_db = st.file_uploader("上傳 Excel", type=['xlsx', 'csv'])
+        if uploaded_db:
+            try:
+                if uploaded_db.name.endswith('csv'): df = pd.read_csv(uploaded_db)
+                else: df = pd.read_excel(uploaded_db)
+                new_db = CHECKS_DB.copy()
+                for _, row in df.iterrows():
+                    cat = str(row.iloc[0]).strip()
+                    item = str(row.iloc[1]).strip()
+                    res = str(row.iloc[2]).strip()
+                    if cat not in new_db: new_db[cat] = {"items": [], "results": []}
+                    new_db[cat]["items"].append(item)
+                    new_db[cat]["results"].append(res)
+                st.session_state['checks_db'] = new_db
+                st.success("擴充成功")
+            except:
+                st.error("讀取失敗")
+
     st.markdown("---")
     st.header("2. 專案資訊")
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
@@ -275,7 +321,7 @@ with st.sidebar:
     p_loc = st.text_input("施作位置", "北棟 1F")
     base_date = st.date_input("日期", datetime.date.today())
 
-# Main
+# --- Main ---
 if st.session_state['saved_template']:
     
     num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=1)
@@ -287,37 +333,42 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 選擇類別 (直接從內建資料庫讀取)
-        db_options = list(CHECKS_DB.keys())
-        selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}")
+        # 1. 類別選擇 (綁定 Callback)
+        db_options = list(st.session_state['checks_db'].keys())
+        selected_type = c1.selectbox(
+            f"選擇檢查工項", 
+            db_options, 
+            key=f"type_{g}",
+            on_change=update_group_defaults, # 關鍵：改變時觸發更新
+            args=(g, base_date)
+        )
         
-        # 2. 自動產生檔名
+        # 2. 自動更新的欄位 (這裡不再給 default value，因為由 callback 控制)
+        # 初始化 key 如果不存在
+        if f"item_{g}" not in st.session_state:
+            update_group_defaults(g, base_date) # 初次執行手動觸發一次
+            
+        g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", key=f"item_{g}")
+        
+        # 日期顯示
         roc_year = base_date.year - 1911
-        roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
+        c3.text(f"日期: {date_display}")
         
-        # 自檢項目名稱 (預設為類別名稱)
-        g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", value=f"{selected_type}", key=f"item_{g}")
-        
-        # 檔名自定義
-        default_filename = f"{roc_date_str}_{selected_type.split(' ')[0]}"
-        file_name_custom = c3.text_input("自定義檔名", value=default_filename, key=f"fname_{g}")
+        # 3. 檔名自定義
+        file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
-        # 3. 照片上傳
+        # 4. 照片上傳
         g_files = st.file_uploader(f"上傳照片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"file_{g}")
         
         if g_files:
             g_photos = []
+            std_items = st.session_state['checks_db'][selected_type]["items"]
             
-            std_items = CHECKS_DB[selected_type]["items"]
-            std_results = CHECKS_DB[selected_type]["results"]
-            
-            # 編輯區
             for i in range(0, len(g_files), 2):
                 row_cols = st.columns(2)
                 for j in range(2):
                     if i + j >= len(g_files): break
-                    
                     file = g_files[i+j]
                     no = i + j + 1
                     
@@ -328,24 +379,30 @@ if st.session_state['saved_template']:
                             st.caption(f"No. {no}")
                         
                         with input_col:
+                            # 下拉選單 (綁定 Callback)
                             options = ["(請選擇...)"] + std_items
-                            # 智慧預選
-                            default_idx = no if no <= len(std_items) else 0
+                            # 預設選單邏輯
+                            def_idx = no if no <= len(std_items) else 0
+                            
+                            # 初始化 keys
+                            if f"d_{g}_{no}" not in st.session_state:
+                                st.session_state[f"d_{g}_{no}"] = ""
+                                st.session_state[f"r_{g}_{no}"] = ""
                             
                             selected_opt = st.selectbox(
-                                "快速選擇", options, index=default_idx, 
-                                label_visibility="collapsed", key=f"sel_{g}_{no}"
+                                "快速選擇", options, index=def_idx, 
+                                label_visibility="collapsed", 
+                                key=f"sel_{g}_{no}",
+                                on_change=update_photo_defaults, # 關鍵：連動更新
+                                args=(g, no)
                             )
                             
-                            current_desc = ""
-                            current_res = ""
-                            if selected_opt != "(請選擇...)":
-                                idx = std_items.index(selected_opt)
-                                current_desc = std_items[idx]
-                                current_res = std_results[idx]
-                            
-                            d_val = st.text_input("說明", value=current_desc, key=f"d_{g}_{no}")
-                            r_val = st.text_input("實測", value=current_res, key=f"r_{g}_{no}")
+                            # 第一次載入時，如果已有預選，手動觸發一次填寫
+                            if st.session_state[f"d_{g}_{no}"] == "" and selected_opt != "(請選擇...)":
+                                update_photo_defaults(g, no)
+
+                            d_val = st.text_input("說明", key=f"d_{g}_{no}")
+                            r_val = st.text_input("實測", key=f"r_{g}_{no}")
                             
                             g_photos.append({
                                 "file": file, "no": no, "date_str": date_display,
@@ -381,10 +438,8 @@ if st.session_state['saved_template']:
                         batch = photos[i : i+8]
                         start_no = i + 1
                         doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
-                        
                         doc_io = io.BytesIO()
                         doc.save(doc_io)
-                        
                         suffix = f"_{page_idx+1}" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
