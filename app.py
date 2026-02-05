@@ -15,7 +15,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 ---
+# --- 1. 終極內建資料庫 (維持不變) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -248,48 +248,38 @@ def init_group_photos(g_idx):
         st.session_state[f"photos_{g_idx}"] = []
 
 def add_new_photos(g_idx, uploaded_files):
-    """將新上傳的照片加入管理清單 (避免重複)"""
+    """將新上傳的照片加入管理清單"""
     init_group_photos(g_idx)
     current_list = st.session_state[f"photos_{g_idx}"]
-    # 建立一個簡單的ID檢查集合
     existing_ids = {p['id'] for p in current_list}
     
     for f in uploaded_files:
-        # 使用檔名+大小作為唯一識別
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
-            # 新增照片物件
             current_list.append({
                 "id": file_id,
                 "file": f,
-                "desc": "", # 說明
-                "result": "", # 實測
-                "selected_opt_index": 0 # 下拉選單記憶
+                "desc": "", 
+                "result": "", 
+                "selected_opt_index": 0 
             })
             existing_ids.add(file_id)
 
 def move_photo(g_idx, index, direction):
-    """移動照片 (direction: -1=前移, 1=後移)"""
     lst = st.session_state[f"photos_{g_idx}"]
     new_index = index + direction
     if 0 <= new_index < len(lst):
-        # 交換位置
         lst[index], lst[new_index] = lst[new_index], lst[index]
 
 def delete_photo(g_idx, index):
-    """刪除照片"""
     lst = st.session_state[f"photos_{g_idx}"]
     if 0 <= index < len(lst):
         del lst[index]
 
-def update_photo_data(g_idx, index, key, value):
-    """更新照片的文字資料 (綁定到 list 中)"""
-    st.session_state[f"photos_{g_idx}"][index][key] = value
-
 # --- 3. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (可排序版)")
+st.title("🏗️ 工程自主檢查表 (修復連動版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -321,17 +311,21 @@ def update_group_info(g_idx):
     st.session_state[f"item_{g_idx}"] = item_name
     st.session_state[f"fname_{g_idx}"] = file_name
     
-    # 清空該組照片的說明，避免舊資料混淆 (選擇性，保留照片但清空文字)
-    # 若想保留文字則註解掉下面這行
+    # 關鍵修正：切換類別時，強制清除該組照片的所有 widget 狀態
+    # 這樣新的 selectbox 才不會讀到舊的 index，避免 TypeError
     if f"photos_{g_idx}" in st.session_state:
         for p in st.session_state[f"photos_{g_idx}"]:
             p['desc'] = ""
             p['result'] = ""
             p['selected_opt_index'] = 0
+            # 清除對應的 session keys
+            for k in [f"sel_{p['id']}", f"desc_{p['id']}", f"result_{p['id']}"]:
+                if k in st.session_state:
+                    del st.session_state[k]
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
-        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_')):
+        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'result_')):
             del st.session_state[key]
     st.session_state['num_groups'] = 1
 
@@ -408,23 +402,18 @@ if st.session_state['saved_template']:
         # --- 照片管理區 ---
         st.markdown("##### 📸 照片上傳與排序")
         
-        # 1. 上傳器 (作為入口)
         new_files = st.file_uploader(f"新增照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"uploader_{g}")
         if new_files:
             add_new_photos(g, new_files)
-            # 不清除 uploader，因為 Streamlit 會自動處理，我們只需確保 add_new_photos 不重複添加
         
-        # 2. 顯示與編輯 (從 session_state 讀取)
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
         
         if photo_list:
-            # 取得該工項的標準選項
             std_items = st.session_state['checks_db'][selected_type]["items"]
             std_results = st.session_state['checks_db'][selected_type]["results"]
             options = ["(請選擇...)"] + std_items
 
-            # 使用容器來排版
             for i, photo_data in enumerate(photo_list):
                 with st.container():
                     col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
@@ -434,45 +423,52 @@ if st.session_state['saved_template']:
                         st.caption(f"No. {i+1:02d}")
                     
                     with col_info:
-                        # 下拉選單
-                        # 我們使用 key=f"sel_{photo_data['id']}" 確保綁定到該照片物件，而不是 index
-                        # 這樣移動照片時，選項會跟著走
-                        
-                        # 邏輯：當下拉選單改變，更新 photo_data['desc'] & ['result']
-                        def on_select_change(idx=i, p_data=photo_data):
-                            # 讀取 widget 的新值
-                            new_idx = st.session_state[f"sel_{p_data['id']}"]
-                            if new_idx > 0: # 0 是 (請選擇...)
-                                p_data['desc'] = std_items[new_idx-1]
-                                p_data['result'] = std_results[new_idx-1]
+                        # 關鍵修正：下拉選單變更邏輯
+                        def on_select_change(pid=photo_data['id']):
+                            new_idx = st.session_state[f"sel_{pid}"]
+                            
+                            # 型別安全檢查 (防止 None 或無效類型)
+                            if isinstance(new_idx, int) and new_idx > 0:
+                                # 更新對應的文字輸入框狀態
+                                st.session_state[f"desc_{pid}"] = std_items[new_idx-1]
+                                st.session_state[f"result_{pid}"] = std_results[new_idx-1]
                             else:
-                                p_data['desc'] = ""
-                                p_data['result'] = ""
-                            p_data['selected_opt_index'] = new_idx
+                                # 選擇了 (請選擇...)
+                                st.session_state[f"desc_{pid}"] = ""
+                                st.session_state[f"result_{pid}"] = ""
 
-                        # 找出目前的 index (如果之前有選過)
+                        # 恢復上次選的 index
                         current_opt_idx = photo_data.get('selected_opt_index', 0)
-                        
+                        # 防呆：如果 index 超出新選單範圍，歸零
+                        if current_opt_idx >= len(options): current_opt_idx = 0
+
                         st.selectbox(
                             "快速填寫", 
                             range(len(options)), 
                             format_func=lambda x: options[x],
                             index=current_opt_idx,
                             key=f"sel_{photo_data['id']}",
-                            on_change=on_select_change,
+                            on_change=on_select_change, # 綁定更新事件
                             label_visibility="collapsed"
                         )
 
-                        # 文字輸入框 (綁定到 photo_data)
-                        def on_text_change(k, idx=i):
-                            # 這是為了讓手動輸入也能存回 list
-                            st.session_state[f"photos_{g}"][idx][k] = st.session_state[f"{k}_{photo_data['id']}"]
+                        # 綁定文字輸入 (讓輸入內容回寫到 photo_data)
+                        def on_text_change(k, pid=photo_data['id'], idx=i):
+                            st.session_state[f"photos_{g}"][idx][k] = st.session_state[f"{k}_{pid}"]
+                            # 同時更新 index 紀錄 (如果使用者自己改了文字，選單可能就不準了，但這裡我們先保留 index)
+                            if k == 'desc':
+                                st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = st.session_state[f"sel_{pid}"]
 
-                        st.text_input("說明", value=photo_data['desc'], key=f"desc_{photo_data['id']}", on_change=on_text_change, args=('desc', i))
-                        st.text_input("實測", value=photo_data['result'], key=f"result_{photo_data['id']}", on_change=on_text_change, args=('result', i))
+                        # 如果是第一次渲染，將 session_state 初始化為 photo_data 的值
+                        if f"desc_{photo_data['id']}" not in st.session_state:
+                            st.session_state[f"desc_{photo_data['id']}"] = photo_data['desc']
+                        if f"result_{photo_data['id']}" not in st.session_state:
+                            st.session_state[f"result_{photo_data['id']}"] = photo_data['result']
+
+                        st.text_input("說明", key=f"desc_{photo_data['id']}", on_change=on_text_change, args=('desc',))
+                        st.text_input("實測", key=f"result_{photo_data['id']}", on_change=on_text_change, args=('result',))
 
                     with col_ctrl:
-                        # 排序與刪除按鈕
                         if st.button("⬆️", key=f"up_{g}_{i}", help="前移"):
                             move_photo(g, i, -1)
                             st.rerun()
@@ -485,15 +481,19 @@ if st.session_state['saved_template']:
                     
                     st.divider()
 
-            # 準備生成的資料結構
+            # 匯出資料準備
             g_photos_export = []
             for i, p in enumerate(photo_list):
+                # 從 session_state 獲取最新值 (雙重保險)
+                final_desc = st.session_state.get(f"desc_{p['id']}", p['desc'])
+                final_result = st.session_state.get(f"result_{p['id']}", p['result'])
+                
                 g_photos_export.append({
                     "file": p['file'],
                     "no": i + 1,
                     "date_str": date_display,
-                    "desc": p['desc'],
-                    "result": p['result']
+                    "desc": final_desc,
+                    "result": final_result
                 })
 
             all_groups_data.append({
