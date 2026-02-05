@@ -8,17 +8,15 @@ import datetime
 from datetime import timedelta, timezone
 import os
 import zipfile
+import pandas as pd
 
-# --- 0. 台灣時區設定 (關鍵修正) ---
+# --- 0. 台灣時區設定 ---
 def get_taiwan_date():
-    """取得台灣目前的日期 (UTC+8)"""
     utc_now = datetime.datetime.now(timezone.utc)
-    taiwan_time = utc_now + timedelta(hours=8)
-    return taiwan_time.date()
+    return (utc_now + timedelta(hours=8)).date()
 
 # --- 1. 終極內建資料庫 ---
 CHECKS_DB = {
-    # --- 既有項目 ---
     "拆除工程-施工 (EA26)": {
         "items": [
             "防護措施:公共管線及環境保護", "安全監測:初始值測量", "防塵作為:灑水或防塵網",
@@ -43,8 +41,6 @@ CHECKS_DB = {
             "載運鋁料 * 1 車", "車號：__________", "總重:____kg / 淨重:____kg"
         ]
     },
-    
-    # --- 擋土排樁系列 (最新更新) ---
     "擋土排樁工程(排樁)-施工": {
         "items": [
             "放樣樁位檢測", "鑽掘垂直度", "鑽掘深度/入岩", "排樁直徑",
@@ -86,75 +82,36 @@ CHECKS_DB = {
         ]
     },
     "擋土排樁工程-材料": {
-        "items": [
-            "證明文件查核", "規格尺寸檢查", "外觀形狀檢查",
-            "工地放置檢查", "取樣試驗"
-        ],
-        "results": [
-            "出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕",
-            "分類置放並標幟、底部墊高", "依規範取樣/不取樣"
-        ]
+        "items": ["證明文件查核", "規格尺寸檢查", "外觀形狀檢查", "工地放置檢查", "取樣試驗"],
+        "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕", "分類置放並標幟、底部墊高", "依規範取樣/不取樣"]
     },
-
-    # --- 其他工程 ---
     "微型樁工程-施工 (EA53)": {
-        "items": [
-            "開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)",
-            "鑽掘尺寸 (深度/樁徑)", "鑽掘間距 (@60cm)", "水泥漿拌合比 (1:1)",
-            "注漿作業 (≦10min)", "鋼管吊放安裝", "廢漿清除", "樁頂劣質打石", 
-            "帽梁鋼筋綁紮", "帽梁灌漿"
-        ],
-        "results": [
-            "確認無地下管線干擾", "樁心偏差 ≦3cm", "垂直度符合規定 (0-5度)",
-            "深度≧16m; 樁徑≧15cm", "間距@60cm, 交錯施工", "水灰比 W/C=1:1",
-            "時間≦10min，注漿至帽梁底部", "長度16m; 間隔器@2m", "已清除硬固廢漿",
-            "劣質混凝土已打除", "主筋#6-4支, 箍筋#3@20cm", "強度 fc'=210kgf/cm2"
-        ]
+        "items": ["開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)", "鑽掘尺寸 (深度/樁徑)", "鑽掘間距 (@60cm)", "水泥漿拌合比 (1:1)", "注漿作業 (≦10min)", "鋼管吊放安裝", "廢漿清除", "樁頂劣質打石", "帽梁鋼筋綁紮", "帽梁灌漿"],
+        "results": ["確認無地下管線干擾", "樁心偏差 ≦3cm", "垂直度符合規定 (0-5度)", "深度≧16m; 樁徑≧15cm", "間距@60cm, 交錯施工", "水灰比 W/C=1:1", "時間≦10min，注漿至帽梁底部", "長度16m; 間隔器@2m", "已清除硬固廢漿", "劣質混凝土已打除", "主筋#6-4支, 箍筋#3@20cm", "強度 fc'=210kgf/cm2"]
     },
     "微型樁工程-材料 (EB53)": {
         "items": ["證明文件", "規格尺寸", "外觀形狀", "工地放置", "取樣試驗"],
         "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範", "無碰撞變形", "分類堆置/標示", "依規範取樣"]
     },
     "假設工程-施工 (EA51)": {
-        "items": [
-            "放樣", "全阻式圍籬組立", "半阻式圍籬組立", "防溢座施作",
-            "出入口地坪(鋼筋/澆置)", "大門安裝", "安全走廊", "警示燈設置",
-            "洗車台尺寸檢查", "圍籬綠化維護"
-        ],
-        "results": [
-            "依施工圖說放樣", "間距/埋入深度符合規定", "間距/埋入深度符合規定", "混凝土210kgf/cm2",
-            "厚度20cm; 雙層雙向#4@10cm", "尺寸及埋入深度符合規定", "高300寬150cm",
-            "間距符合規定", "500x522cm; 沉沙池深170cm", "存活率90%以上"
-        ]
+        "items": ["放樣", "全阻式圍籬組立", "半阻式圍籬組立", "防溢座施作", "出入口地坪(鋼筋/澆置)", "大門安裝", "安全走廊", "警示燈設置", "洗車台尺寸檢查", "圍籬綠化維護"],
+        "results": ["依施工圖說放樣", "間距/埋入深度符合規定", "間距/埋入深度符合規定", "混凝土210kgf/cm2", "厚度20cm; 雙層雙向#4@10cm", "尺寸及埋入深度符合規定", "高300寬150cm", "間距符合規定", "500x522cm; 沉沙池深170cm", "存活率90%以上"]
     },
     "假設工程-材料 (EB51)": {
         "items": ["證明文件", "外觀形狀", "工地放置", "預鑄水溝尺寸"],
         "results": ["出廠證明/檢驗紀錄齊全", "無碰撞變形、破損", "分類堆置/標示", "內溝寬30±5cm, 深40±5cm"]
     },
     "車道拓寬工程 (EA52)": {
-        "items": [
-            "碎石級配舖設", "鋼筋綁紮", "模板組立", "混凝土澆置(結構)",
-            "粉刷面清潔", "基準灰誌製作", "馬賽克磚舖貼", "瀝青混凝土舖設"
-        ],
-        "results": [
-            "級配高度 20cm", "箍筋#4@20cm; 保護層4cm", "牆厚20cm; 垂直度±13mm", "強度 210kgf/cm2",
-            "無殘餘雜物、凸出物", "間距不大於1M", "顏色與樣板相同", "密級配，無汙損浮起"
-        ]
+        "items": ["碎石級配舖設", "鋼筋綁紮", "模板組立", "混凝土澆置(結構)", "粉刷面清潔", "基準灰誌製作", "馬賽克磚舖貼", "瀝青混凝土舖設"],
+        "results": ["級配高度 20cm", "箍筋#4@20cm; 保護層4cm", "牆厚20cm; 垂直度±13mm", "強度 210kgf/cm2", "無殘餘雜物、凸出物", "間距不大於1M", "顏色與樣板相同", "密級配，無汙損浮起"]
     },
     "混凝土工程 (共用)": {
-        "items": [
-            "照明與雨天防護", "澆置前清潔濕潤", "模板振動器", "澆置時間控制",
-            "坍度/流度檢查", "溫度檢查", "氯離子含量", "試體取樣", "振動搗實", "養護作業"
-        ],
-        "results": [
-            "照明充足，備有防雨材", "垃圾清除，模板濕潤", "備有至少二具", "拌合至澆置90分鐘內",
-            "符合設計 (如 18±4cm)", "13~32度C", "小於 0.15 kg/m3", "每100m3取樣1組",
-            "間距<50cm; 每次5-10秒", "灑水或覆蓋養護"
-        ]
+        "items": ["照明與雨天防護", "澆置前清潔濕潤", "模板振動器", "澆置時間控制", "坍度/流度檢查", "溫度檢查", "氯離子含量", "試體取樣", "振動搗實", "養護作業"],
+        "results": ["照明充足，備有防雨材", "垃圾清除，模板濕潤", "備有至少二具", "拌合至澆置90分鐘內", "符合設計 (如 18±4cm)", "13~32度C", "小於 0.15 kg/m3", "每100m3取樣1組", "間距<50cm; 每次5-10秒", "灑水或覆蓋養護"]
     }
 }
 
-# --- 2. 樣式與影像處理 ---
+# --- 1. Word 與影像處理核心 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -189,13 +146,11 @@ def apply_style_to_run(run, style):
 
 def compress_image(image_file, max_width=800):
     img = Image.open(image_file)
-    if img.mode == 'RGBA':
-        img = img.convert('RGB')
+    if img.mode == 'RGBA': img = img.convert('RGB')
     try:
         from PIL import ImageOps
         img = ImageOps.exif_transpose(img)
-    except:
-        pass
+    except: pass
     ratio = max_width / float(img.size[0])
     if ratio < 1:
         h_size = int((float(img.size[1]) * float(ratio)))
@@ -204,8 +159,6 @@ def compress_image(image_file, max_width=800):
     img.save(img_byte_arr, format='JPEG', quality=75)
     img_byte_arr.seek(0)
     return img_byte_arr
-
-# --- 3. 替換邏輯 (純淨樣式) ---
 
 def replace_text_content(doc, replacements):
     for table in doc.tables:
@@ -252,7 +205,6 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
     text_replacements = {f"{{{k}}}": v for k, v in context.items()}
     replace_text_content(doc, text_replacements)
-    
     for i in range(1, 9):
         img_key = f"{{img_{i}}}"
         info_key = f"{{info_{i}}}"
@@ -260,25 +212,18 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
         if idx < len(photo_batch):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
-            
             spacer = "\u3000" * 6 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
             info_text += f"實測：{data['result']}"
-            
             replace_text_content(doc, {info_key: info_text})
         else:
             replace_text_content(doc, {img_key: ""})
             replace_text_content(doc, {info_key: ""})
     return doc
 
-# --- 4. 智慧命名邏輯 ---
-
 def generate_names(selected_type, base_date):
-    """生成標準化的項目名稱與檔名"""
     clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
-    
-    # 決定後綴
     suffix = "自主檢查"
     if "施工" in clean_type or "混凝土" in clean_type:
         suffix = "施工自主檢查"
@@ -289,19 +234,62 @@ def generate_names(selected_type, base_date):
     elif "有價廢料" in clean_type:
         suffix = "有價廢料清運自主檢查"
         clean_type = clean_type.replace("-有價廢料", "")
-    
     full_item_name = f"{clean_type}{suffix}"
-    
     roc_year = base_date.year - 1911
     roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
     file_name = f"{roc_date_str}{full_item_name}"
-    
     return full_item_name, file_name
 
-# --- 5. Streamlit UI ---
+# --- 2. 狀態管理函數 (排序與資料綁定) ---
+
+def init_group_photos(g_idx):
+    """初始化該組的照片儲存清單"""
+    if f"photos_{g_idx}" not in st.session_state:
+        st.session_state[f"photos_{g_idx}"] = []
+
+def add_new_photos(g_idx, uploaded_files):
+    """將新上傳的照片加入管理清單 (避免重複)"""
+    init_group_photos(g_idx)
+    current_list = st.session_state[f"photos_{g_idx}"]
+    # 建立一個簡單的ID檢查集合
+    existing_ids = {p['id'] for p in current_list}
+    
+    for f in uploaded_files:
+        # 使用檔名+大小作為唯一識別
+        file_id = f"{f.name}_{f.size}"
+        if file_id not in existing_ids:
+            # 新增照片物件
+            current_list.append({
+                "id": file_id,
+                "file": f,
+                "desc": "", # 說明
+                "result": "", # 實測
+                "selected_opt_index": 0 # 下拉選單記憶
+            })
+            existing_ids.add(file_id)
+
+def move_photo(g_idx, index, direction):
+    """移動照片 (direction: -1=前移, 1=後移)"""
+    lst = st.session_state[f"photos_{g_idx}"]
+    new_index = index + direction
+    if 0 <= new_index < len(lst):
+        # 交換位置
+        lst[index], lst[new_index] = lst[new_index], lst[index]
+
+def delete_photo(g_idx, index):
+    """刪除照片"""
+    lst = st.session_state[f"photos_{g_idx}"]
+    if 0 <= index < len(lst):
+        del lst[index]
+
+def update_photo_data(g_idx, index, key, value):
+    """更新照片的文字資料 (綁定到 list 中)"""
+    st.session_state[f"photos_{g_idx}"][index][key] = value
+
+# --- 3. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (台灣時區版)")
+st.title("🏗️ 工程自主檢查表 (可排序版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -314,10 +302,8 @@ if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PA
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# --- Callbacks ---
-
+# Callbacks
 def update_all_filenames():
-    """當全域日期改變時，更新所有組別的檔名"""
     base_date = st.session_state['global_date']
     num = st.session_state['num_groups']
     for g in range(num):
@@ -329,51 +315,27 @@ def update_all_filenames():
             st.session_state[f"fname_{g}"] = file_name
 
 def update_group_info(g_idx):
-    """當工項改變時，更新名稱並清除舊資料"""
     base_date = st.session_state['global_date']
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, file_name = generate_names(selected_type, base_date)
-    
     st.session_state[f"item_{g_idx}"] = item_name
     st.session_state[f"fname_{g_idx}"] = file_name
     
-    # 安全清除：只清除該組的選單與文字，避免資料錯亂
-    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(f"sel_{g_idx}_") or k.startswith(f"d_{g_idx}_") or k.startswith(f"r_{g_idx}_")]
-    for k in keys_to_clear:
-        del st.session_state[k]
-
-def update_photo_defaults(g_idx, p_no):
-    """照片選單改變時，更新說明"""
-    sel_key = f"sel_{g_idx}_{p_no}"
-    desc_key = f"d_{g_idx}_{p_no}"
-    res_key = f"r_{g_idx}_{p_no}"
-    type_key = f"type_{g_idx}"
-    
-    selected_opt = st.session_state[sel_key]
-    current_type = st.session_state[type_key]
-    
-    if selected_opt != "(請選擇...)":
-        items = st.session_state['checks_db'][current_type]["items"]
-        results = st.session_state['checks_db'][current_type]["results"]
-        if selected_opt in items:
-            idx = items.index(selected_opt)
-            st.session_state[desc_key] = items[idx]
-            st.session_state[res_key] = results[idx]
-    else:
-        st.session_state[desc_key] = ""
-        st.session_state[res_key] = ""
+    # 清空該組照片的說明，避免舊資料混淆 (選擇性，保留照片但清空文字)
+    # 若想保留文字則註解掉下面這行
+    if f"photos_{g_idx}" in st.session_state:
+        for p in st.session_state[f"photos_{g_idx}"]:
+            p['desc'] = ""
+            p['result'] = ""
+            p['selected_opt_index'] = 0
 
 def clear_all_data():
-    """清除所有填寫資料"""
-    keys_to_clear = []
-    for key in st.session_state.keys():
-        if key.startswith(('type_', 'item_', 'fname_', 'sel_', 'd_', 'r_', 'file_')):
-            keys_to_clear.append(key)
-    for key in keys_to_clear:
-        del st.session_state[key]
+    for key in list(st.session_state.keys()):
+        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_')):
+            del st.session_state[key]
     st.session_state['num_groups'] = 1
 
-# --- Sidebar ---
+# Sidebar
 with st.sidebar:
     st.header("1. 樣板設定")
     if st.session_state['saved_template']:
@@ -413,22 +375,12 @@ with st.sidebar:
     p_sub = st.text_input("協力廠商", "川峻工程有限公司")
     p_loc = st.text_input("施作位置", "北棟 1F")
     
-    # 使用台灣時間作為預設值
-    base_date = st.date_input(
-        "日期", 
-        get_taiwan_date(),
-        key='global_date',
-        on_change=update_all_filenames
-    )
+    base_date = st.date_input("日期", get_taiwan_date(), key='global_date', on_change=update_all_filenames)
 
-# --- Main ---
+# Main
 if st.session_state['saved_template']:
     
-    num_groups = st.number_input(
-        "本次產生幾組檢查表？", 
-        min_value=1, value=st.session_state['num_groups'],
-        key='num_groups_input'
-    )
+    num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=st.session_state['num_groups'], key='num_groups_input')
     st.session_state['num_groups'] = num_groups
     
     all_groups_data = []
@@ -440,74 +392,109 @@ if st.session_state['saved_template']:
         c1, c2, c3 = st.columns([2, 2, 1])
         
         db_options = list(st.session_state['checks_db'].keys())
-        selected_type = c1.selectbox(
-            f"選擇檢查工項", 
-            db_options, 
-            key=f"type_{g}",
-            on_change=update_group_info,
-            args=(g,)
-        )
+        selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
         if f"item_{g}" not in st.session_state:
             update_group_info(g)
             
-        g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", key=f"item_{g}")
+        g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
         
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
         
-        file_name_custom = st.text_input("自定義檔名 (下載時使用)", key=f"fname_{g}")
+        file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
-        # 照片上傳區
-        st.info("💡 提醒：重新整理網頁會導致照片被清空，請小心操作。")
-        g_files = st.file_uploader(f"上傳照片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"file_{g}")
+        # --- 照片管理區 ---
+        st.markdown("##### 📸 照片上傳與排序")
         
-        if g_files:
-            g_photos = []
+        # 1. 上傳器 (作為入口)
+        new_files = st.file_uploader(f"新增照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"uploader_{g}")
+        if new_files:
+            add_new_photos(g, new_files)
+            # 不清除 uploader，因為 Streamlit 會自動處理，我們只需確保 add_new_photos 不重複添加
+        
+        # 2. 顯示與編輯 (從 session_state 讀取)
+        init_group_photos(g)
+        photo_list = st.session_state[f"photos_{g}"]
+        
+        if photo_list:
+            # 取得該工項的標準選項
             std_items = st.session_state['checks_db'][selected_type]["items"]
-            
-            for i in range(0, len(g_files), 2):
-                row_cols = st.columns(2)
-                for j in range(2):
-                    if i + j >= len(g_files): break
-                    file = g_files[i+j]
-                    no = i + j + 1
-                    
-                    with row_cols[j]:
-                        img_col, input_col = st.columns([1, 2])
-                        with img_col:
-                            st.image(file, use_container_width=True)
-                            st.caption(f"No. {no}")
-                        
-                        with input_col:
-                            options = ["(請選擇...)"] + std_items
-                            def_idx = no if no <= len(std_items) else 0
-                            
-                            # 初始化 keys
-                            if f"d_{g}_{no}" not in st.session_state:
-                                st.session_state[f"d_{g}_{no}"] = ""
-                                st.session_state[f"r_{g}_{no}"] = ""
-                            
-                            selected_opt = st.selectbox(
-                                "快速選擇", options, index=def_idx, 
-                                label_visibility="collapsed", 
-                                key=f"sel_{g}_{no}",
-                                on_change=update_photo_defaults,
-                                args=(g, no)
-                            )
-                            
-                            if st.session_state[f"d_{g}_{no}"] == "" and selected_opt != "(請選擇...)":
-                                update_photo_defaults(g, no)
+            std_results = st.session_state['checks_db'][selected_type]["results"]
+            options = ["(請選擇...)"] + std_items
 
-                            d_val = st.text_input("說明", key=f"d_{g}_{no}")
-                            r_val = st.text_input("實測", key=f"r_{g}_{no}")
-                            
-                            g_photos.append({
-                                "file": file, "no": no, "date_str": date_display,
-                                "desc": d_val, "result": r_val
-                            })
-                        st.divider()
+            # 使用容器來排版
+            for i, photo_data in enumerate(photo_list):
+                with st.container():
+                    col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
+                    
+                    with col_img:
+                        st.image(photo_data['file'], use_container_width=True)
+                        st.caption(f"No. {i+1:02d}")
+                    
+                    with col_info:
+                        # 下拉選單
+                        # 我們使用 key=f"sel_{photo_data['id']}" 確保綁定到該照片物件，而不是 index
+                        # 這樣移動照片時，選項會跟著走
+                        
+                        # 邏輯：當下拉選單改變，更新 photo_data['desc'] & ['result']
+                        def on_select_change(idx=i, p_data=photo_data):
+                            # 讀取 widget 的新值
+                            new_idx = st.session_state[f"sel_{p_data['id']}"]
+                            if new_idx > 0: # 0 是 (請選擇...)
+                                p_data['desc'] = std_items[new_idx-1]
+                                p_data['result'] = std_results[new_idx-1]
+                            else:
+                                p_data['desc'] = ""
+                                p_data['result'] = ""
+                            p_data['selected_opt_index'] = new_idx
+
+                        # 找出目前的 index (如果之前有選過)
+                        current_opt_idx = photo_data.get('selected_opt_index', 0)
+                        
+                        st.selectbox(
+                            "快速填寫", 
+                            range(len(options)), 
+                            format_func=lambda x: options[x],
+                            index=current_opt_idx,
+                            key=f"sel_{photo_data['id']}",
+                            on_change=on_select_change,
+                            label_visibility="collapsed"
+                        )
+
+                        # 文字輸入框 (綁定到 photo_data)
+                        def on_text_change(k, idx=i):
+                            # 這是為了讓手動輸入也能存回 list
+                            st.session_state[f"photos_{g}"][idx][k] = st.session_state[f"{k}_{photo_data['id']}"]
+
+                        st.text_input("說明", value=photo_data['desc'], key=f"desc_{photo_data['id']}", on_change=on_text_change, args=('desc', i))
+                        st.text_input("實測", value=photo_data['result'], key=f"result_{photo_data['id']}", on_change=on_text_change, args=('result', i))
+
+                    with col_ctrl:
+                        # 排序與刪除按鈕
+                        if st.button("⬆️", key=f"up_{g}_{i}", help="前移"):
+                            move_photo(g, i, -1)
+                            st.rerun()
+                        if st.button("⬇️", key=f"down_{g}_{i}", help="後移"):
+                            move_photo(g, i, 1)
+                            st.rerun()
+                        if st.button("❌", key=f"del_{g}_{i}", help="移除"):
+                            delete_photo(g, i)
+                            st.rerun()
+                    
+                    st.divider()
+
+            # 準備生成的資料結構
+            g_photos_export = []
+            for i, p in enumerate(photo_list):
+                g_photos_export.append({
+                    "file": p['file'],
+                    "no": i + 1,
+                    "date_str": date_display,
+                    "desc": p['desc'],
+                    "result": p['result']
+                })
 
             all_groups_data.append({
                 "group_id": g+1,
@@ -517,9 +504,10 @@ if st.session_state['saved_template']:
                     "sub_contractor": p_sub, "location": p_loc, 
                     "date": date_display, "check_item": g_item
                 },
-                "photos": g_photos
+                "photos": g_photos_export
             })
 
+    # 生成按鈕
     st.markdown("---")
     if st.button("🚀 立即生成並下載", type="primary", use_container_width=True):
         if not all_groups_data:
