@@ -15,7 +15,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 (維持不變) ---
+# --- 1. 終極內建資料庫 ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -111,7 +111,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 1. Word 與影像處理核心 ---
+# --- 1. Word 與影像處理 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -240,19 +240,16 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- 2. 狀態管理函數 (排序與資料綁定) ---
+# --- 2. 狀態管理函數 ---
 
 def init_group_photos(g_idx):
-    """初始化該組的照片儲存清單"""
     if f"photos_{g_idx}" not in st.session_state:
         st.session_state[f"photos_{g_idx}"] = []
 
 def add_new_photos(g_idx, uploaded_files):
-    """將新上傳的照片加入管理清單"""
     init_group_photos(g_idx)
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
-    
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
@@ -276,12 +273,11 @@ def delete_photo(g_idx, index):
     if 0 <= index < len(lst):
         del lst[index]
 
-# --- 3. Streamlit UI ---
+# --- 3. UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (修復連動版)")
+st.title("🏗️ 工程自主檢查表 (穩定修復版)")
 
-# Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
@@ -297,31 +293,37 @@ def update_all_filenames():
     base_date = st.session_state['global_date']
     num = st.session_state['num_groups']
     for g in range(num):
-        type_key = f"type_{g}"
-        if type_key in st.session_state:
-            selected_type = st.session_state[type_key]
+        if f"type_{g}" in st.session_state:
+            selected_type = st.session_state[f"type_{g}"]
             item_name, file_name = generate_names(selected_type, base_date)
             st.session_state[f"item_{g}"] = item_name
             st.session_state[f"fname_{g}"] = file_name
 
 def update_group_info(g_idx):
+    """
+    切換工項時：
+    1. 更新檔名
+    2. 清除該組照片的所有下拉選單紀錄 (避免索引越界)
+    3. 重置該組照片的文字說明
+    """
     base_date = st.session_state['global_date']
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, file_name = generate_names(selected_type, base_date)
     st.session_state[f"item_{g_idx}"] = item_name
     st.session_state[f"fname_{g_idx}"] = file_name
     
-    # 關鍵修正：切換類別時，強制清除該組照片的所有 widget 狀態
-    # 這樣新的 selectbox 才不會讀到舊的 index，避免 TypeError
+    # 清除 session 中該組的所有 widget 狀態
+    # 關鍵：這裡的 prefix 必須跟下面的 widget key 完全一致 f"sel_{g_idx}_{pid}"
+    keys_to_clear = [k for k in st.session_state.keys() if f"_{g_idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("result_"))]
+    for k in keys_to_clear:
+        del st.session_state[k]
+        
+    # 重置內部資料
     if f"photos_{g_idx}" in st.session_state:
         for p in st.session_state[f"photos_{g_idx}"]:
             p['desc'] = ""
             p['result'] = ""
             p['selected_opt_index'] = 0
-            # 清除對應的 session keys
-            for k in [f"sel_{p['id']}", f"desc_{p['id']}", f"result_{p['id']}"]:
-                if k in st.session_state:
-                    del st.session_state[k]
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
@@ -368,7 +370,6 @@ with st.sidebar:
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
     p_sub = st.text_input("協力廠商", "川峻工程有限公司")
     p_loc = st.text_input("施作位置", "北棟 1F")
-    
     base_date = st.date_input("日期", get_taiwan_date(), key='global_date', on_change=update_all_filenames)
 
 # Main
@@ -392,16 +393,12 @@ if st.session_state['saved_template']:
             update_group_info(g)
             
         g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
-        
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
-        
         file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
-        # --- 照片管理區 ---
-        st.markdown("##### 📸 照片上傳與排序")
-        
+        # Photos
         new_files = st.file_uploader(f"新增照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"uploader_{g}")
         if new_files:
             add_new_photos(g, new_files)
@@ -417,83 +414,90 @@ if st.session_state['saved_template']:
             for i, photo_data in enumerate(photo_list):
                 with st.container():
                     col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
+                    pid = photo_data['id']
                     
                     with col_img:
                         st.image(photo_data['file'], use_container_width=True)
                         st.caption(f"No. {i+1:02d}")
                     
                     with col_info:
-                        # 關鍵修正：下拉選單變更邏輯
-                        def on_select_change(pid=photo_data['id']):
-                            new_idx = st.session_state[f"sel_{pid}"]
-                            
-                            # 型別安全檢查 (防止 None 或無效類型)
-                            if isinstance(new_idx, int) and new_idx > 0:
-                                # 更新對應的文字輸入框狀態
-                                st.session_state[f"desc_{pid}"] = std_items[new_idx-1]
-                                st.session_state[f"result_{pid}"] = std_results[new_idx-1]
-                            else:
-                                # 選擇了 (請選擇...)
-                                st.session_state[f"desc_{pid}"] = ""
-                                st.session_state[f"result_{pid}"] = ""
+                        # 鍵值結構： f"prefix_{g}_{pid}"
+                        sel_key = f"sel_{g}_{pid}"
+                        desc_key = f"desc_{g}_{pid}"
+                        result_key = f"result_{g}_{pid}"
 
-                        # 恢復上次選的 index
+                        # 修正後的 callback：安全讀取
+                        def on_select_change(pk=pid, gk=g):
+                            k = f"sel_{gk}_{pk}"
+                            # 防呆：如果 key 不存在，直接返回
+                            if k not in st.session_state: return
+                            
+                            new_idx = st.session_state[k]
+                            dk = f"desc_{gk}_{pk}"
+                            rk = f"result_{gk}_{pk}"
+                            
+                            if new_idx > 0 and new_idx <= len(std_items):
+                                st.session_state[dk] = std_items[new_idx-1]
+                                st.session_state[rk] = std_results[new_idx-1]
+                            else:
+                                st.session_state[dk] = ""
+                                st.session_state[rk] = ""
+
+                        # 恢復 index
                         current_opt_idx = photo_data.get('selected_opt_index', 0)
-                        # 防呆：如果 index 超出新選單範圍，歸零
-                        if current_opt_idx >= len(options): current_opt_idx = 0
+                        if current_opt_idx > len(options): current_opt_idx = 0
 
                         st.selectbox(
                             "快速填寫", 
                             range(len(options)), 
                             format_func=lambda x: options[x],
                             index=current_opt_idx,
-                            key=f"sel_{photo_data['id']}",
-                            on_change=on_select_change, # 綁定更新事件
+                            key=sel_key,
+                            on_change=on_select_change,
                             label_visibility="collapsed"
                         )
 
-                        # 綁定文字輸入 (讓輸入內容回寫到 photo_data)
-                        def on_text_change(k, pid=photo_data['id'], idx=i):
-                            st.session_state[f"photos_{g}"][idx][k] = st.session_state[f"{k}_{pid}"]
-                            # 同時更新 index 紀錄 (如果使用者自己改了文字，選單可能就不準了，但這裡我們先保留 index)
-                            if k == 'desc':
-                                st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = st.session_state[f"sel_{pid}"]
+                        # 資料綁定 callback
+                        def on_text_change(field, pk=pid, idx=i):
+                            val = st.session_state[f"{field}_{g}_{pk}"]
+                            st.session_state[f"photos_{g}"][idx][field_map[field]] = val
+                            if field == 'sel':
+                                st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
 
-                        # 如果是第一次渲染，將 session_state 初始化為 photo_data 的值
-                        if f"desc_{photo_data['id']}" not in st.session_state:
-                            st.session_state[f"desc_{photo_data['id']}"] = photo_data['desc']
-                        if f"result_{photo_data['id']}" not in st.session_state:
-                            st.session_state[f"result_{photo_data['id']}"] = photo_data['result']
+                        field_map = {'desc': 'desc', 'result': 'result', 'sel': 'selected_opt_index'}
 
-                        st.text_input("說明", key=f"desc_{photo_data['id']}", on_change=on_text_change, args=('desc',))
-                        st.text_input("實測", key=f"result_{photo_data['id']}", on_change=on_text_change, args=('result',))
+                        # 確保 session state 有值
+                        if desc_key not in st.session_state: st.session_state[desc_key] = photo_data['desc']
+                        if result_key not in st.session_state: st.session_state[result_key] = photo_data['result']
+
+                        st.text_input("說明", key=desc_key, on_change=on_text_change, args=('desc',))
+                        st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
 
                     with col_ctrl:
-                        if st.button("⬆️", key=f"up_{g}_{i}", help="前移"):
+                        if st.button("⬆️", key=f"up_{g}_{i}"):
                             move_photo(g, i, -1)
                             st.rerun()
-                        if st.button("⬇️", key=f"down_{g}_{i}", help="後移"):
+                        if st.button("⬇️", key=f"down_{g}_{i}"):
                             move_photo(g, i, 1)
                             st.rerun()
-                        if st.button("❌", key=f"del_{g}_{i}", help="移除"):
+                        if st.button("❌", key=f"del_{g}_{i}"):
                             delete_photo(g, i)
                             st.rerun()
-                    
                     st.divider()
 
-            # 匯出資料準備
+            # Export data prep
             g_photos_export = []
             for i, p in enumerate(photo_list):
-                # 從 session_state 獲取最新值 (雙重保險)
-                final_desc = st.session_state.get(f"desc_{p['id']}", p['desc'])
-                final_result = st.session_state.get(f"result_{p['id']}", p['result'])
+                # 安全獲取最終值
+                d_val = st.session_state.get(f"desc_{g}_{p['id']}", p['desc'])
+                r_val = st.session_state.get(f"result_{g}_{p['id']}", p['result'])
                 
                 g_photos_export.append({
                     "file": p['file'],
                     "no": i + 1,
                     "date_str": date_display,
-                    "desc": final_desc,
-                    "result": final_result
+                    "desc": d_val,
+                    "result": r_val
                 })
 
             all_groups_data.append({
@@ -507,7 +511,6 @@ if st.session_state['saved_template']:
                 "photos": g_photos_export
             })
 
-    # 生成按鈕
     st.markdown("---")
     if st.button("🚀 立即生成並下載", type="primary", use_container_width=True):
         if not all_groups_data:
@@ -519,7 +522,6 @@ if st.session_state['saved_template']:
                     photos = group['photos']
                     context = group['context']
                     file_prefix = group['file_prefix']
-                    
                     for page_idx, i in enumerate(range(0, len(photos), 8)):
                         batch = photos[i : i+8]
                         start_no = i + 1
@@ -529,17 +531,10 @@ if st.session_state['saved_template']:
                         suffix = f"({page_idx+1})" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
-            
             st.session_state['zip_buffer'] = zip_buffer.getvalue()
             st.success("✅ 完成！")
 
     if st.session_state['zip_buffer']:
-        st.download_button(
-            label="📥 下載 ZIP 檔",
-            data=st.session_state['zip_buffer'],
-            file_name=f"自檢表_{datetime.date.today()}.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
+        st.download_button(label="📥 下載 ZIP 檔", data=st.session_state['zip_buffer'], file_name=f"自檢表_{datetime.date.today()}.zip", mime="application/zip", use_container_width=True)
 else:
     st.info("👈 請先在左側確認 Word 樣板")
