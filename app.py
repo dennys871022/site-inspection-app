@@ -5,13 +5,20 @@ from docx.oxml.ns import qn
 from PIL import Image
 import io
 import datetime
+from datetime import timedelta, timezone
 import os
 import zipfile
-import pandas as pd
 
-# --- 0. 終極內建資料庫 (更新至 115.02.04 版) ---
+# --- 0. 台灣時區設定 (關鍵修正) ---
+def get_taiwan_date():
+    """取得台灣目前的日期 (UTC+8)"""
+    utc_now = datetime.datetime.now(timezone.utc)
+    taiwan_time = utc_now + timedelta(hours=8)
+    return taiwan_time.date()
+
+# --- 1. 終極內建資料庫 ---
 CHECKS_DB = {
-    # --- 既有項目 (保留) ---
+    # --- 既有項目 ---
     "拆除工程-施工 (EA26)": {
         "items": [
             "防護措施:公共管線及環境保護", "安全監測:初始值測量", "防塵作為:灑水或防塵網",
@@ -37,7 +44,7 @@ CHECKS_DB = {
         ]
     },
     
-    # --- 新增/更新：擋土排樁工程系列 ---
+    # --- 擋土排樁系列 (最新更新) ---
     "擋土排樁工程(排樁)-施工": {
         "items": [
             "放樣樁位檢測", "鑽掘垂直度", "鑽掘深度/入岩", "排樁直徑",
@@ -89,7 +96,7 @@ CHECKS_DB = {
         ]
     },
 
-    # --- 其他工程 (保留) ---
+    # --- 其他工程 ---
     "微型樁工程-施工 (EA53)": {
         "items": [
             "開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)",
@@ -147,7 +154,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 1. 樣式與影像處理 ---
+# --- 2. 樣式與影像處理 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -198,7 +205,7 @@ def compress_image(image_file, max_width=800):
     img_byte_arr.seek(0)
     return img_byte_arr
 
-# --- 2. 替換邏輯 (純淨樣式) ---
+# --- 3. 替換邏輯 (純淨樣式) ---
 
 def replace_text_content(doc, replacements):
     for table in doc.tables:
@@ -254,7 +261,6 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
             
-            # 日期前 6 個全形空白
             spacer = "\u3000" * 6 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
@@ -266,38 +272,28 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             replace_text_content(doc, {info_key: ""})
     return doc
 
-# --- 4. 智慧命名邏輯 (核心) ---
+# --- 4. 智慧命名邏輯 ---
 
 def generate_names(selected_type, base_date):
-    """
-    生成標準化的項目名稱與檔名
-    Input: "擋土排樁工程(預壘樁)-施工", date object
-    Output: "擋土排樁工程(預壘樁)施工自主檢查", "1150204擋土排樁工程(預壘樁)施工自主檢查"
-    """
-    # 1. 處理名稱前綴
-    # 移除括號代號 (EA26) 等
+    """生成標準化的項目名稱與檔名"""
     clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
-    
-    # 分割工程與類型 (e.g. "擋土排樁工程(預壘樁)-施工")
-    parts = clean_type.split('-')
-    main_name = parts[0] # "擋土排樁工程(預壘樁)"
     
     # 決定後綴
     suffix = "自主檢查"
     if "施工" in clean_type or "混凝土" in clean_type:
         suffix = "施工自主檢查"
+        clean_type = clean_type.replace("-施工", "")
     elif "材料" in clean_type:
         suffix = "材料進場自主檢查"
+        clean_type = clean_type.replace("-材料", "")
     elif "有價廢料" in clean_type:
         suffix = "有價廢料清運自主檢查"
+        clean_type = clean_type.replace("-有價廢料", "")
     
-    full_item_name = f"{main_name}{suffix}"
+    full_item_name = f"{clean_type}{suffix}"
     
-    # 2. 處理日期
     roc_year = base_date.year - 1911
     roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
-    
-    # 3. 組合檔名
     file_name = f"{roc_date_str}{full_item_name}"
     
     return full_item_name, file_name
@@ -305,7 +301,7 @@ def generate_names(selected_type, base_date):
 # --- 5. Streamlit UI ---
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (資料保護版)")
+st.title("🏗️ 工程自主檢查表 (台灣時區版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -321,7 +317,7 @@ if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PA
 # --- Callbacks ---
 
 def update_all_filenames():
-    """當全域日期改變時，更新所有組別的檔名與日期顯示。"""
+    """當全域日期改變時，更新所有組別的檔名"""
     base_date = st.session_state['global_date']
     num = st.session_state['num_groups']
     for g in range(num):
@@ -333,12 +329,18 @@ def update_all_filenames():
             st.session_state[f"fname_{g}"] = file_name
 
 def update_group_info(g_idx):
-    """當某組的工項改變時，更新該組的名稱與檔名"""
+    """當工項改變時，更新名稱並清除舊資料"""
     base_date = st.session_state['global_date']
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, file_name = generate_names(selected_type, base_date)
+    
     st.session_state[f"item_{g_idx}"] = item_name
     st.session_state[f"fname_{g_idx}"] = file_name
+    
+    # 安全清除：只清除該組的選單與文字，避免資料錯亂
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(f"sel_{g_idx}_") or k.startswith(f"d_{g_idx}_") or k.startswith(f"r_{g_idx}_")]
+    for k in keys_to_clear:
+        del st.session_state[k]
 
 def update_photo_defaults(g_idx, p_no):
     """照片選單改變時，更新說明"""
@@ -362,17 +364,14 @@ def update_photo_defaults(g_idx, p_no):
         st.session_state[res_key] = ""
 
 def clear_all_data():
-    """清除所有 Session State 資料 (除了樣板和資料庫)"""
+    """清除所有填寫資料"""
     keys_to_clear = []
     for key in st.session_state.keys():
         if key.startswith(('type_', 'item_', 'fname_', 'sel_', 'd_', 'r_', 'file_')):
             keys_to_clear.append(key)
-    
     for key in keys_to_clear:
         del st.session_state[key]
-    
     st.session_state['num_groups'] = 1
-    # 這裡不呼叫 rerurn，Streamlit 會自動重整
 
 # --- Sidebar ---
 with st.sidebar:
@@ -405,8 +404,7 @@ with st.sidebar:
                 st.error("讀取失敗")
     
     st.markdown("---")
-    # 清除資料按鈕 (放在側邊欄下方，紅色)
-    st.button("🗑️ 清除所有填寫資料", type="primary", on_click=clear_all_data, help="按此按鈕才會清空表單，防止手滑重整")
+    st.button("🗑️ 清除所有填寫資料", type="primary", on_click=clear_all_data)
 
     st.markdown("---")
     st.header("2. 專案資訊")
@@ -415,10 +413,10 @@ with st.sidebar:
     p_sub = st.text_input("協力廠商", "川峻工程有限公司")
     p_loc = st.text_input("施作位置", "北棟 1F")
     
-    # 日期選擇 (綁定 on_change)
+    # 使用台灣時間作為預設值
     base_date = st.date_input(
         "日期", 
-        datetime.date.today(),
+        get_taiwan_date(),
         key='global_date',
         on_change=update_all_filenames
     )
@@ -441,7 +439,6 @@ if st.session_state['saved_template']:
         
         c1, c2, c3 = st.columns([2, 2, 1])
         
-        # 1. 選擇工項 (綁定 on_change)
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(
             f"選擇檢查工項", 
@@ -451,21 +448,19 @@ if st.session_state['saved_template']:
             args=(g,)
         )
         
-        # 確保初始化
         if f"item_{g}" not in st.session_state:
             update_group_info(g)
             
-        # 2. 自動產生的欄位
         g_item = c2.text_input(f"自檢項目名稱 {{check_item}}", key=f"item_{g}")
         
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
         
-        # 3. 檔名自定義
         file_name_custom = st.text_input("自定義檔名 (下載時使用)", key=f"fname_{g}")
 
-        # 4. 照片上傳
+        # 照片上傳區
+        st.info("💡 提醒：重新整理網頁會導致照片被清空，請小心操作。")
         g_files = st.file_uploader(f"上傳照片", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"file_{g}")
         
         if g_files:
@@ -489,6 +484,7 @@ if st.session_state['saved_template']:
                             options = ["(請選擇...)"] + std_items
                             def_idx = no if no <= len(std_items) else 0
                             
+                            # 初始化 keys
                             if f"d_{g}_{no}" not in st.session_state:
                                 st.session_state[f"d_{g}_{no}"] = ""
                                 st.session_state[f"r_{g}_{no}"] = ""
@@ -524,7 +520,6 @@ if st.session_state['saved_template']:
                 "photos": g_photos
             })
 
-    # 生成按鈕
     st.markdown("---")
     if st.button("🚀 立即生成並下載", type="primary", use_container_width=True):
         if not all_groups_data:
