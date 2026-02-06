@@ -19,7 +19,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 ---
+# --- 1. 終極內建資料庫 (維持不變) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -86,14 +86,8 @@ CHECKS_DB = {
         ]
     },
     "擋土排樁工程-材料": {
-        "items": [
-            "證明文件查核", "規格尺寸檢查", "外觀形狀檢查",
-            "工地放置檢查", "取樣試驗"
-        ],
-        "results": [
-            "出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕",
-            "分類置放並標幟、底部墊高", "依規範取樣/不取樣"
-        ]
+        "items": ["證明文件查核", "規格尺寸檢查", "外觀形狀檢查", "工地放置檢查", "取樣試驗"],
+        "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕", "分類置放並標幟、底部墊高", "依規範取樣/不取樣"]
     },
     "微型樁工程-施工 (EA53)": {
         "items": ["開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)", "鑽掘尺寸 (深度/樁徑)", "鑽掘間距 (@60cm)", "水泥漿拌合比 (1:1)", "注漿作業 (≦10min)", "鋼管吊放安裝", "廢漿清除", "樁頂劣質打石", "帽梁鋼筋綁紮", "帽梁灌漿"],
@@ -121,7 +115,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 2. 核心功能 ---
+# --- 2. 核心功能 (樣式與處理) ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -249,27 +243,42 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email ---
+# --- Email 寄送功能 (增強版) ---
 def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email):
+    """
+    支援 Gmail 和 Outlook/Hotmail
+    """
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
-    msg['Subject'] = f"[自動寄送] {filename} (工程自主檢查表)"
-    body = "這是由系統自動生成的檢查表，請查收附件。"
+    msg['Subject'] = f"[自動寄送] {filename}"
+    
+    body = f"這是由系統自動生成的檢查表：{filename}\n請查收附件。"
     msg.attach(MIMEText(body, 'plain'))
+    
     part = MIMEApplication(zip_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
+    
+    # 判斷 Server
+    smtp_server = 'smtp.gmail.com'
+    smtp_port = 587
+    if 'outlook' in sender_email or 'hotmail' in sender_email or 'live' in sender_email:
+        smtp_server = 'smtp.office365.com'
+        smtp_port = 587
+    
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
         server.login(sender_email, sender_password)
         text = msg.as_string()
         server.sendmail(sender_email, receiver_email, text)
         server.quit()
-        return True, "寄送成功！"
+        return True, "✅ 寄送成功！請檢查收件信箱。"
+    except smtplib.SMTPAuthenticationError:
+        return False, "❌ 認證失敗 (535)：\n1. 若是 Gmail，請確認是否使用了「應用程式密碼」而非登入密碼。\n2. 若是 Outlook，請確認帳密是否正確。"
     except Exception as e:
-        return False, f"寄送失敗: {str(e)}"
+        return False, f"❌ 寄送失敗: {str(e)}"
 
 # --- 狀態管理 ---
 def init_group_photos(g_idx):
@@ -301,7 +310,7 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (修正版)")
+st.title("🏗️ 工程自主檢查表 (多管道傳送版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -309,7 +318,7 @@ if 'zip_filename' not in st.session_state: st.session_state['zip_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
-# Email記憶 (初始化空字串)
+# Email記憶
 if 'email_sender' not in st.session_state: st.session_state['email_sender'] = ""
 if 'email_password' not in st.session_state: st.session_state['email_password'] = ""
 if 'email_receiver' not in st.session_state: st.session_state['email_receiver'] = ""
@@ -442,9 +451,6 @@ if st.session_state['saved_template']:
                             if k not in st.session_state: return
                             new_idx = st.session_state[k]
                             dk, rk = f"desc_{gk}_{pk}", f"result_{gk}_{pk}"
-                            
-                            # === 修正後的邏輯 ===
-                            # 確保 new_idx 是整數且在有效範圍內
                             if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(std_items):
                                 st.session_state[dk] = std_items[new_idx-1]
                                 st.session_state[rk] = std_results[new_idx-1]
@@ -521,17 +527,29 @@ if st.session_state['saved_template']:
         col_dl, col_mail = st.columns(2)
         with col_dl:
             st.download_button(label="📥 下載 ZIP 檔案", data=st.session_state['zip_buffer'], file_name=st.session_state['zip_filename'], mime="application/zip", use_container_width=True)
+            
+            # 手動寄信按鈕 (Mailto)
+            subject = f"工程自主檢查表_{datetime.date.today()}"
+            body = "請查收附件 ZIP 檔案。"
+            mailto_link = f"mailto:?subject={subject}&body={body}"
+            st.markdown(f"""
+            <a href="{mailto_link}" target="_blank" style="text-decoration:none;">
+                <button style="width:100%; border:1px solid #ccc; background:white; color:black; padding:0.5rem; border-radius:5px; cursor:pointer;">
+                    📧 手動開啟 Email App (需自行附加檔案)
+                </button>
+            </a>
+            """, unsafe_allow_html=True)
+
         with col_mail:
-            with st.expander("📧 寄送 Email (免下載)", expanded=True):
-                # 記憶輸入的 Email 資訊
+            with st.expander("🤖 自動寄送 Email (免下載)", expanded=True):
                 def update_email_info():
                     st.session_state['email_sender'] = st.session_state['input_sender']
                     st.session_state['email_password'] = st.session_state['input_password']
                     st.session_state['email_receiver'] = st.session_state['input_receiver']
 
                 receiver = st.text_input("收件者 Email", value=st.session_state['email_receiver'], key='input_receiver', on_change=update_email_info)
-                sender = st.text_input("您的 Gmail", value=st.session_state['email_sender'], key='input_sender', on_change=update_email_info)
-                password = st.text_input("應用程式密碼", value=st.session_state['email_password'], type="password", key='input_password', on_change=update_email_info)
+                sender = st.text_input("寄件者 Email (Gmail/Outlook)", value=st.session_state['email_sender'], key='input_sender', on_change=update_email_info, placeholder="支援 Gmail 與 Outlook/Hotmail")
+                password = st.text_input("密碼 (Gmail需用應用程式密碼)", value=st.session_state['email_password'], type="password", key='input_password', on_change=update_email_info)
                 
                 if st.button("📤 發送郵件"):
                     if not receiver or not sender or not password:
