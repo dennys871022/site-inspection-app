@@ -19,7 +19,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 (維持不變) ---
+# --- 1. 終極內建資料庫 ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -86,8 +86,14 @@ CHECKS_DB = {
         ]
     },
     "擋土排樁工程-材料": {
-        "items": ["證明文件查核", "規格尺寸檢查", "外觀形狀檢查", "工地放置檢查", "取樣試驗"],
-        "results": ["出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕", "分類置放並標幟、底部墊高", "依規範取樣/不取樣"]
+        "items": [
+            "證明文件查核", "規格尺寸檢查", "外觀形狀檢查",
+            "工地放置檢查", "取樣試驗"
+        ],
+        "results": [
+            "出廠證明/檢驗紀錄齊全", "符合契約規範及訂貨規格", "無碰撞變形、破損、裂痕",
+            "分類置放並標幟、底部墊高", "依規範取樣/不取樣"
+        ]
     },
     "微型樁工程-施工 (EA53)": {
         "items": ["開挖前置:管線確認", "樁心檢測 (≦3cm)", "鑽掘垂直度 (0-5度)", "鑽掘尺寸 (深度/樁徑)", "鑽掘間距 (@60cm)", "水泥漿拌合比 (1:1)", "注漿作業 (≦10min)", "鋼管吊放安裝", "廢漿清除", "樁頂劣質打石", "帽梁鋼筋綁紮", "帽梁灌漿"],
@@ -243,27 +249,18 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 ---
+# --- Email ---
 def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email):
-    """
-    使用 Gmail SMTP 寄送 ZIP 檔
-    注意：sender_password 必須是 Gmail 的「應用程式密碼 (App Password)」，而非登入密碼。
-    """
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
     msg['Subject'] = f"[自動寄送] {filename} (工程自主檢查表)"
-    
     body = "這是由系統自動生成的檢查表，請查收附件。"
     msg.attach(MIMEText(body, 'plain'))
-    
-    # 附件
     part = MIMEApplication(zip_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
-    
     try:
-        # 連接 Gmail SMTP
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
@@ -304,16 +301,19 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (雲端傳送版)")
+st.title("🏗️ 工程自主檢查表 (修正版)")
 
-# Init Session State
+# Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
 if 'zip_filename' not in st.session_state: st.session_state['zip_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
+# Email記憶 (初始化空字串)
+if 'email_sender' not in st.session_state: st.session_state['email_sender'] = ""
+if 'email_password' not in st.session_state: st.session_state['email_password'] = ""
+if 'email_receiver' not in st.session_state: st.session_state['email_receiver'] = ""
 
-# Auto load template
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
@@ -349,7 +349,7 @@ def clear_all_data():
         if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'result_')):
             del st.session_state[key]
     st.session_state['num_groups'] = 1
-    st.session_state['zip_buffer'] = None # 清空下載快取
+    st.session_state['zip_buffer'] = None
 
 # Sidebar
 with st.sidebar:
@@ -442,7 +442,10 @@ if st.session_state['saved_template']:
                             if k not in st.session_state: return
                             new_idx = st.session_state[k]
                             dk, rk = f"desc_{gk}_{pk}", f"result_{gk}_{pk}"
-                            if new_idx > 0 and new_idx <= len(std_items):
+                            
+                            # === 修正後的邏輯 ===
+                            # 確保 new_idx 是整數且在有效範圍內
+                            if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(std_items):
                                 st.session_state[dk] = std_items[new_idx-1]
                                 st.session_state[rk] = std_results[new_idx-1]
                             else:
@@ -491,8 +494,6 @@ if st.session_state['saved_template']:
             })
 
     st.markdown("---")
-    
-    # 1. 生成按鈕
     if st.button("🚀 1. 產生報告 ZIP", type="primary", use_container_width=True):
         if not all_groups_data:
             st.error("請上傳照片")
@@ -512,41 +513,31 @@ if st.session_state['saved_template']:
                         suffix = f"({page_idx+1})" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
-            
             st.session_state['zip_buffer'] = zip_buffer.getvalue()
             st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
-            st.success("✅ 報告已生成！請選擇下載或寄送。")
+            st.success("✅ 報告已生成！")
 
-    # 2. 下載與寄送區 (生成後才顯示)
     if st.session_state['zip_buffer']:
         col_dl, col_mail = st.columns(2)
-        
         with col_dl:
-            st.download_button(
-                label="📥 下載 ZIP 檔案",
-                data=st.session_state['zip_buffer'],
-                file_name=st.session_state['zip_filename'],
-                mime="application/zip",
-                use_container_width=True
-            )
-            st.info("💡 提醒：若使用手機，下載後請至「檔案」App 查看。")
-
+            st.download_button(label="📥 下載 ZIP 檔案", data=st.session_state['zip_buffer'], file_name=st.session_state['zip_filename'], mime="application/zip", use_container_width=True)
         with col_mail:
-            with st.expander("📧 寄送 Email (傳送至電腦)", expanded=True):
-                receiver = st.text_input("收件者 Email", placeholder="例如: boss@company.com")
-                st.markdown("**寄件設定 (Gmail)**")
-                sender = st.text_input("您的 Gmail", placeholder="me@gmail.com")
-                password = st.text_input("應用程式密碼 (非登入密碼)", type="password", help="請至 Google 帳戶 > 安全性 > 兩步驟驗證 > 應用程式密碼 申請")
+            with st.expander("📧 寄送 Email (免下載)", expanded=True):
+                # 記憶輸入的 Email 資訊
+                def update_email_info():
+                    st.session_state['email_sender'] = st.session_state['input_sender']
+                    st.session_state['email_password'] = st.session_state['input_password']
+                    st.session_state['email_receiver'] = st.session_state['input_receiver']
+
+                receiver = st.text_input("收件者 Email", value=st.session_state['email_receiver'], key='input_receiver', on_change=update_email_info)
+                sender = st.text_input("您的 Gmail", value=st.session_state['email_sender'], key='input_sender', on_change=update_email_info)
+                password = st.text_input("應用程式密碼", value=st.session_state['email_password'], type="password", key='input_password', on_change=update_email_info)
                 
                 if st.button("📤 發送郵件"):
                     if not receiver or not sender or not password:
-                        st.error("請填寫完整 Email 資訊")
+                        st.error("請填寫完整資訊")
                     else:
-                        success, msg = send_email_with_zip(
-                            st.session_state['zip_buffer'], 
-                            st.session_state['zip_filename'], 
-                            sender, password, receiver
-                        )
+                        success, msg = send_email_with_zip(st.session_state['zip_buffer'], st.session_state['zip_filename'], sender, password, receiver)
                         if success: st.success(msg)
                         else: st.error(msg)
 
