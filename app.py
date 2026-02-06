@@ -115,7 +115,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 2. 核心功能 (樣式與處理) ---
+# --- 2. 核心功能 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -243,10 +243,10 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 (增強版) ---
-def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email):
+# --- Email 寄送功能 (修正版：支援選擇伺服器) ---
+def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email, service_provider):
     """
-    支援 Gmail 和 Outlook/Hotmail
+    依據使用者選擇的服務商設定 SMTP
     """
     msg = MIMEMultipart()
     msg['From'] = sender_email
@@ -260,13 +260,17 @@ def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, rece
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
     
-    # 判斷 Server
-    smtp_server = 'smtp.gmail.com'
-    smtp_port = 587
-    if 'outlook' in sender_email or 'hotmail' in sender_email or 'live' in sender_email:
+    # SMTP 設定
+    if service_provider == "Gmail":
+        smtp_server = 'smtp.gmail.com'
+        smtp_port = 587
+    elif service_provider == "Outlook / Office 365":
         smtp_server = 'smtp.office365.com'
         smtp_port = 587
-    
+    else: # 自訂
+        st.error("目前尚未開放自訂 SMTP")
+        return False, "設定錯誤"
+
     try:
         server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
@@ -276,7 +280,12 @@ def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, rece
         server.quit()
         return True, "✅ 寄送成功！請檢查收件信箱。"
     except smtplib.SMTPAuthenticationError:
-        return False, "❌ 認證失敗 (535)：\n1. 若是 Gmail，請確認是否使用了「應用程式密碼」而非登入密碼。\n2. 若是 Outlook，請確認帳密是否正確。"
+        error_msg = "❌ 認證失敗！"
+        if service_provider == "Gmail":
+            error_msg += "\n請確認是否使用了「應用程式密碼」 (非登入密碼)。"
+        elif service_provider == "Outlook / Office 365":
+            error_msg += "\n請確認您的 Outlook 帳號密碼是否正確，或是否開啟了雙重驗證。"
+        return False, error_msg
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
@@ -310,7 +319,7 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (多管道傳送版)")
+st.title("🏗️ 工程自主檢查表 (企業信箱支援版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -322,6 +331,7 @@ if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
 if 'email_sender' not in st.session_state: st.session_state['email_sender'] = ""
 if 'email_password' not in st.session_state: st.session_state['email_password'] = ""
 if 'email_receiver' not in st.session_state: st.session_state['email_receiver'] = ""
+if 'email_provider' not in st.session_state: st.session_state['email_provider'] = "Outlook / Office 365" # 預設改為 Outlook
 
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
@@ -528,7 +538,6 @@ if st.session_state['saved_template']:
         with col_dl:
             st.download_button(label="📥 下載 ZIP 檔案", data=st.session_state['zip_buffer'], file_name=st.session_state['zip_filename'], mime="application/zip", use_container_width=True)
             
-            # 手動寄信按鈕 (Mailto)
             subject = f"工程自主檢查表_{datetime.date.today()}"
             body = "請查收附件 ZIP 檔案。"
             mailto_link = f"mailto:?subject={subject}&body={body}"
@@ -542,20 +551,42 @@ if st.session_state['saved_template']:
 
         with col_mail:
             with st.expander("🤖 自動寄送 Email (免下載)", expanded=True):
+                # 記憶輸入的 Email 資訊
                 def update_email_info():
                     st.session_state['email_sender'] = st.session_state['input_sender']
                     st.session_state['email_password'] = st.session_state['input_password']
                     st.session_state['email_receiver'] = st.session_state['input_receiver']
+                    st.session_state['email_provider'] = st.session_state['input_provider']
+
+                # 1. 選擇服務商
+                provider = st.selectbox(
+                    "選擇郵件伺服器", 
+                    ["Gmail", "Outlook / Office 365"], 
+                    index=1 if st.session_state['email_provider'] == "Outlook / Office 365" else 0,
+                    key='input_provider',
+                    on_change=update_email_info
+                )
 
                 receiver = st.text_input("收件者 Email", value=st.session_state['email_receiver'], key='input_receiver', on_change=update_email_info)
-                sender = st.text_input("寄件者 Email (Gmail/Outlook)", value=st.session_state['email_sender'], key='input_sender', on_change=update_email_info, placeholder="支援 Gmail 與 Outlook/Hotmail")
-                password = st.text_input("密碼 (Gmail需用應用程式密碼)", value=st.session_state['email_password'], type="password", key='input_password', on_change=update_email_info)
+                sender = st.text_input(
+                    "寄件者 Email (您的帳號)", 
+                    value=st.session_state['email_sender'], 
+                    key='input_sender', 
+                    placeholder="例如: user@fengyu.com.tw",
+                    on_change=update_email_info
+                )
+                
+                # 根據選擇顯示提示
+                pwd_label = "應用程式密碼" if provider == "Gmail" else "登入密碼"
+                pwd_help = "Gmail 需使用應用程式密碼；Outlook 通常使用登入密碼。"
+                
+                password = st.text_input(pwd_label, value=st.session_state['email_password'], type="password", key='input_password', help=pwd_help, on_change=update_email_info)
                 
                 if st.button("📤 發送郵件"):
                     if not receiver or not sender or not password:
                         st.error("請填寫完整資訊")
                     else:
-                        success, msg = send_email_with_zip(st.session_state['zip_buffer'], st.session_state['zip_filename'], sender, password, receiver)
+                        success, msg = send_email_with_zip(st.session_state['zip_buffer'], st.session_state['zip_filename'], sender, password, receiver, provider)
                         if success: st.success(msg)
                         else: st.error(msg)
 
