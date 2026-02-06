@@ -9,13 +9,17 @@ from datetime import timedelta, timezone
 import os
 import zipfile
 import pandas as pd
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
 # --- 0. 台灣時區設定 ---
 def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 ---
+# --- 1. 終極內建資料庫 (維持不變) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -111,7 +115,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 1. Word 與影像處理 ---
+# --- 2. 核心功能 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -127,8 +131,7 @@ def get_paragraph_style(paragraph):
             rPr = run._element.rPr
             if rPr is not None and rPr.rFonts is not None:
                 style['eastAsia'] = rPr.rFonts.get(qn('w:eastAsia'))
-        except:
-            pass
+        except: pass
     return style
 
 def apply_style_to_run(run, style):
@@ -240,8 +243,38 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- 2. 狀態管理函數 ---
+# --- Email 寄送功能 ---
+def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email):
+    """
+    使用 Gmail SMTP 寄送 ZIP 檔
+    注意：sender_password 必須是 Gmail 的「應用程式密碼 (App Password)」，而非登入密碼。
+    """
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = f"[自動寄送] {filename} (工程自主檢查表)"
+    
+    body = "這是由系統自動生成的檢查表，請查收附件。"
+    msg.attach(MIMEText(body, 'plain'))
+    
+    # 附件
+    part = MIMEApplication(zip_bytes, Name=filename)
+    part['Content-Disposition'] = f'attachment; filename="{filename}"'
+    msg.attach(part)
+    
+    try:
+        # 連接 Gmail SMTP
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        text = msg.as_string()
+        server.sendmail(sender_email, receiver_email, text)
+        server.quit()
+        return True, "寄送成功！"
+    except Exception as e:
+        return False, f"寄送失敗: {str(e)}"
 
+# --- 狀態管理 ---
 def init_group_photos(g_idx):
     if f"photos_{g_idx}" not in st.session_state:
         st.session_state[f"photos_{g_idx}"] = []
@@ -254,11 +287,7 @@ def add_new_photos(g_idx, uploaded_files):
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
             current_list.append({
-                "id": file_id,
-                "file": f,
-                "desc": "", 
-                "result": "", 
-                "selected_opt_index": 0 
+                "id": file_id, "file": f, "desc": "", "result": "", "selected_opt_index": 0 
             })
             existing_ids.add(file_id)
 
@@ -273,16 +302,18 @@ def delete_photo(g_idx, index):
     if 0 <= index < len(lst):
         del lst[index]
 
-# --- 3. UI ---
-
+# --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (穩定修復版)")
+st.title("🏗️ 工程自主檢查表 (雲端傳送版)")
 
+# Init Session State
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
+if 'zip_filename' not in st.session_state: st.session_state['zip_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
 
+# Auto load template
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
@@ -293,43 +324,32 @@ def update_all_filenames():
     base_date = st.session_state['global_date']
     num = st.session_state['num_groups']
     for g in range(num):
-        if f"type_{g}" in st.session_state:
-            selected_type = st.session_state[f"type_{g}"]
+        type_key = f"type_{g}"
+        if type_key in st.session_state:
+            selected_type = st.session_state[type_key]
             item_name, file_name = generate_names(selected_type, base_date)
             st.session_state[f"item_{g}"] = item_name
             st.session_state[f"fname_{g}"] = file_name
 
 def update_group_info(g_idx):
-    """
-    切換工項時：
-    1. 更新檔名
-    2. 清除該組照片的所有下拉選單紀錄 (避免索引越界)
-    3. 重置該組照片的文字說明
-    """
     base_date = st.session_state['global_date']
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, file_name = generate_names(selected_type, base_date)
     st.session_state[f"item_{g_idx}"] = item_name
     st.session_state[f"fname_{g_idx}"] = file_name
     
-    # 清除 session 中該組的所有 widget 狀態
-    # 關鍵：這裡的 prefix 必須跟下面的 widget key 完全一致 f"sel_{g_idx}_{pid}"
     keys_to_clear = [k for k in st.session_state.keys() if f"_{g_idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("result_"))]
-    for k in keys_to_clear:
-        del st.session_state[k]
-        
-    # 重置內部資料
+    for k in keys_to_clear: del st.session_state[k]
     if f"photos_{g_idx}" in st.session_state:
         for p in st.session_state[f"photos_{g_idx}"]:
-            p['desc'] = ""
-            p['result'] = ""
-            p['selected_opt_index'] = 0
+            p['desc'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
         if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'result_')):
             del st.session_state[key]
     st.session_state['num_groups'] = 1
+    st.session_state['zip_buffer'] = None # 清空下載快取
 
 # Sidebar
 with st.sidebar:
@@ -358,8 +378,7 @@ with st.sidebar:
                     new_db[cat]["results"].append(res)
                 st.session_state['checks_db'] = new_db
                 st.success("擴充成功")
-            except:
-                st.error("讀取失敗")
+            except: st.error("讀取失敗")
     
     st.markdown("---")
     st.button("🗑️ 清除所有填寫資料", type="primary", on_click=clear_all_data)
@@ -385,12 +404,10 @@ if st.session_state['saved_template']:
         st.subheader(f"📂 第 {g+1} 組")
         
         c1, c2, c3 = st.columns([2, 2, 1])
-        
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
-        if f"item_{g}" not in st.session_state:
-            update_group_info(g)
+        if f"item_{g}" not in st.session_state: update_group_info(g)
             
         g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
         roc_year = base_date.year - 1911
@@ -398,10 +415,9 @@ if st.session_state['saved_template']:
         c3.text(f"日期: {date_display}")
         file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
-        # Photos
+        st.markdown("##### 📸 照片上傳與排序")
         new_files = st.file_uploader(f"新增照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"uploader_{g}")
-        if new_files:
-            add_new_photos(g, new_files)
+        if new_files: add_new_photos(g, new_files)
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
@@ -421,21 +437,11 @@ if st.session_state['saved_template']:
                         st.caption(f"No. {i+1:02d}")
                     
                     with col_info:
-                        # 鍵值結構： f"prefix_{g}_{pid}"
-                        sel_key = f"sel_{g}_{pid}"
-                        desc_key = f"desc_{g}_{pid}"
-                        result_key = f"result_{g}_{pid}"
-
-                        # 修正後的 callback：安全讀取
                         def on_select_change(pk=pid, gk=g):
                             k = f"sel_{gk}_{pk}"
-                            # 防呆：如果 key 不存在，直接返回
                             if k not in st.session_state: return
-                            
                             new_idx = st.session_state[k]
-                            dk = f"desc_{gk}_{pk}"
-                            rk = f"result_{gk}_{pk}"
-                            
+                            dk, rk = f"desc_{gk}_{pk}", f"result_{gk}_{pk}"
                             if new_idx > 0 and new_idx <= len(std_items):
                                 st.session_state[dk] = std_items[new_idx-1]
                                 st.session_state[rk] = std_results[new_idx-1]
@@ -443,30 +449,18 @@ if st.session_state['saved_template']:
                                 st.session_state[dk] = ""
                                 st.session_state[rk] = ""
 
-                        # 恢復 index
                         current_opt_idx = photo_data.get('selected_opt_index', 0)
                         if current_opt_idx > len(options): current_opt_idx = 0
 
-                        st.selectbox(
-                            "快速填寫", 
-                            range(len(options)), 
-                            format_func=lambda x: options[x],
-                            index=current_opt_idx,
-                            key=sel_key,
-                            on_change=on_select_change,
-                            label_visibility="collapsed"
-                        )
+                        st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
 
-                        # 資料綁定 callback
                         def on_text_change(field, pk=pid, idx=i):
                             val = st.session_state[f"{field}_{g}_{pk}"]
                             st.session_state[f"photos_{g}"][idx][field_map[field]] = val
-                            if field == 'sel':
-                                st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
+                            if field == 'sel': st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
 
-                        field_map = {'desc': 'desc', 'result': 'result', 'sel': 'selected_opt_index'}
-
-                        # 確保 session state 有值
+                        field_map = {'desc': 'desc', 'result': 'result'}
+                        desc_key, result_key = f"desc_{g}_{pid}", f"result_{g}_{pid}"
                         if desc_key not in st.session_state: st.session_state[desc_key] = photo_data['desc']
                         if result_key not in st.session_state: st.session_state[result_key] = photo_data['result']
 
@@ -474,45 +468,32 @@ if st.session_state['saved_template']:
                         st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
 
                     with col_ctrl:
-                        if st.button("⬆️", key=f"up_{g}_{i}"):
-                            move_photo(g, i, -1)
-                            st.rerun()
-                        if st.button("⬇️", key=f"down_{g}_{i}"):
-                            move_photo(g, i, 1)
-                            st.rerun()
-                        if st.button("❌", key=f"del_{g}_{i}"):
-                            delete_photo(g, i)
-                            st.rerun()
+                        if st.button("⬆️", key=f"up_{g}_{i}"): move_photo(g, i, -1); st.rerun()
+                        if st.button("⬇️", key=f"down_{g}_{i}"): move_photo(g, i, 1); st.rerun()
+                        if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
                     st.divider()
 
-            # Export data prep
             g_photos_export = []
             for i, p in enumerate(photo_list):
-                # 安全獲取最終值
                 d_val = st.session_state.get(f"desc_{g}_{p['id']}", p['desc'])
                 r_val = st.session_state.get(f"result_{g}_{p['id']}", p['result'])
-                
                 g_photos_export.append({
-                    "file": p['file'],
-                    "no": i + 1,
-                    "date_str": date_display,
-                    "desc": d_val,
-                    "result": r_val
+                    "file": p['file'], "no": i + 1, "date_str": date_display, "desc": d_val, "result": r_val
                 })
 
             all_groups_data.append({
-                "group_id": g+1,
-                "file_prefix": file_name_custom,
+                "group_id": g+1, "file_prefix": file_name_custom,
                 "context": {
-                    "project_name": p_name, "contractor": p_cont, 
-                    "sub_contractor": p_sub, "location": p_loc, 
-                    "date": date_display, "check_item": g_item
+                    "project_name": p_name, "contractor": p_cont, "sub_contractor": p_sub,
+                    "location": p_loc, "date": date_display, "check_item": g_item
                 },
                 "photos": g_photos_export
             })
 
     st.markdown("---")
-    if st.button("🚀 立即生成並下載", type="primary", use_container_width=True):
+    
+    # 1. 生成按鈕
+    if st.button("🚀 1. 產生報告 ZIP", type="primary", use_container_width=True):
         if not all_groups_data:
             st.error("請上傳照片")
         else:
@@ -531,10 +512,43 @@ if st.session_state['saved_template']:
                         suffix = f"({page_idx+1})" if len(photos) > 8 else ""
                         fname = f"{file_prefix}{suffix}.docx"
                         zf.writestr(fname, doc_io.getvalue())
+            
             st.session_state['zip_buffer'] = zip_buffer.getvalue()
-            st.success("✅ 完成！")
+            st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
+            st.success("✅ 報告已生成！請選擇下載或寄送。")
 
+    # 2. 下載與寄送區 (生成後才顯示)
     if st.session_state['zip_buffer']:
-        st.download_button(label="📥 下載 ZIP 檔", data=st.session_state['zip_buffer'], file_name=f"自檢表_{datetime.date.today()}.zip", mime="application/zip", use_container_width=True)
+        col_dl, col_mail = st.columns(2)
+        
+        with col_dl:
+            st.download_button(
+                label="📥 下載 ZIP 檔案",
+                data=st.session_state['zip_buffer'],
+                file_name=st.session_state['zip_filename'],
+                mime="application/zip",
+                use_container_width=True
+            )
+            st.info("💡 提醒：若使用手機，下載後請至「檔案」App 查看。")
+
+        with col_mail:
+            with st.expander("📧 寄送 Email (傳送至電腦)", expanded=True):
+                receiver = st.text_input("收件者 Email", placeholder="例如: boss@company.com")
+                st.markdown("**寄件設定 (Gmail)**")
+                sender = st.text_input("您的 Gmail", placeholder="me@gmail.com")
+                password = st.text_input("應用程式密碼 (非登入密碼)", type="password", help="請至 Google 帳戶 > 安全性 > 兩步驟驗證 > 應用程式密碼 申請")
+                
+                if st.button("📤 發送郵件"):
+                    if not receiver or not sender or not password:
+                        st.error("請填寫完整 Email 資訊")
+                    else:
+                        success, msg = send_email_with_zip(
+                            st.session_state['zip_buffer'], 
+                            st.session_state['zip_filename'], 
+                            sender, password, receiver
+                        )
+                        if success: st.success(msg)
+                        else: st.error(msg)
+
 else:
     st.info("👈 請先在左側確認 Word 樣板")
