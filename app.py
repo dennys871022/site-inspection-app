@@ -244,11 +244,9 @@ def remove_element(element):
     if parent is not None:
         parent.remove(element)
 
-# --- 核心修改：徹底砍掉分頁符號之後的所有內容 ---
 def truncate_doc_after_page_break(doc):
     """
     找到文件中的第一個分頁符號，並刪除該符號及其後的所有元素
-    (包含第二頁的表格、文字等所有內容)
     """
     body = doc.element.body
     break_index = -1
@@ -264,9 +262,14 @@ def truncate_doc_after_page_break(doc):
     # 如果找到分頁符號，執行「一刀切」
     if break_index != -1:
         # 從最後一個元素開始刪除，直到分頁符號(含)為止
-        # 使用 reversed range 避免刪除時索引跑掉
         for i in range(len(body) - 1, break_index - 1, -1):
             remove_element(body[i])
+
+def cleanup_template_for_short_report(doc, num_photos):
+    # 此函式暫時保留做為備用，但主要邏輯已移至 truncate_doc_after_page_break
+    if num_photos > 4:
+        return 
+    truncate_doc_after_page_break(doc)
 
 def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
@@ -295,7 +298,7 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
     if len(photo_batch) <= 4:
         truncate_doc_after_page_break(doc)
     
-    # 4. 清理剩餘佔位符 (預防萬一還有殘留)
+    # 4. 清理剩餘佔位符
     final_clean = {}
     for i in range(1, 9):
         final_clean[f"{{img_{i}}}"] = ""
@@ -304,11 +307,7 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
 
     return doc
 
-def generate_clean_filename_base(selected_type, base_date):
-    """
-    產生純文字的檔名 (不含副檔名)，用於預設輸入框
-    格式: YYMMDD+工項名稱+(備註)
-    """
+def generate_names(selected_type, base_date):
     clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
     suffix = "自主檢查"
     if "施工" in clean_type or "混凝土" in clean_type:
@@ -331,8 +330,13 @@ def generate_clean_filename_base(selected_type, base_date):
     
     roc_year = base_date.year - 1911
     roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
-    
-    return f"{roc_date_str}{full_item_name}"
+    file_name = f"{roc_date_str}{full_item_name}"
+    return full_item_name, file_name
+
+def generate_clean_filename_base(selected_type, base_date):
+    """產生純文字的檔名 (不含副檔名)，用於預設輸入框"""
+    _, file_name = generate_names(selected_type, base_date)
+    return file_name # generate_names 返回的 file_name 已經包含 roc_date
 
 # --- Email 寄送功能 ---
 def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
@@ -417,8 +421,29 @@ if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PA
         st.session_state['saved_template'] = f.read()
 
 # Callbacks
+def update_all_filenames():
+    base_date = st.session_state['global_date']
+    num = st.session_state['num_groups']
+    for g in range(num):
+        type_key = f"type_{g}"
+        if type_key in st.session_state:
+            selected_type = st.session_state[type_key]
+            item_name, file_name = generate_names(selected_type, base_date)
+            st.session_state[f"item_{g}"] = item_name
+            st.session_state[f"fname_{g}"] = file_name
+
 def update_group_info(g_idx):
-    # 當選擇工項改變時，清除該組的舊資料
+    # 1. 取得必要參數 (日期與選擇項目)
+    base_date = st.session_state.get('global_date', datetime.date.today())
+    selected_type = st.session_state[f"type_{g_idx}"]
+    
+    # 2. 自動計算標準名稱 (套用規則)
+    item_name, _ = generate_names(selected_type, base_date)
+    
+    # 3. 強制更新到 Session State (讓輸入框自動填入)
+    st.session_state[f"item_{g_idx}"] = item_name
+
+    # 4. 清除該組舊資料
     keys_to_clear = [k for k in st.session_state.keys() if f"_{g_idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("result_"))]
     for k in keys_to_clear: del st.session_state[k]
     if f"photos_{g_idx}" in st.session_state:
@@ -489,7 +514,6 @@ if st.session_state['saved_template']:
     
     all_groups_data = []
 
-    # --- 迴圈產生各組輸入介面 ---
     for g in range(num_groups):
         st.markdown(f"---")
         st.subheader(f"📂 第 {g+1} 組")
@@ -497,21 +521,17 @@ if st.session_state['saved_template']:
         c1, c2, c3 = st.columns([2, 2, 1])
         db_options = list(st.session_state['checks_db'].keys())
         
-        # 檢查工項選擇 (連動回傳 update_group_info)
+        # 1. 選擇檢查工項 (連動 update_group_info)
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
-        # 自動產生「檢查項目名稱」 (顯示在介面給使用者看，也會存入 context)
-        # 這裡的邏輯與 generate_names 類似，只是用於顯示
-        clean_type_display = selected_type.split(' (EA')[0].split(' (EB')[0]
-        # (這裡只做簡單顯示，實際檔名生成邏輯在最後面)
-        
-        g_item = c2.text_input(f"自檢項目名稱", value=clean_type_display, key=f"item_{g}")
+        # 2. 自動連動名稱輸入框 (依賴 update_group_info 寫入 Session State)
+        g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
         
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
         
-        # 移除了個別的「自定義檔名」輸入框
+        # (已移除個別的自定義檔名輸入框)
 
         st.markdown("##### 📸 照片上傳與排序 (支援一次多選)")
         
@@ -540,18 +560,13 @@ if st.session_state['saved_template']:
             if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
                 current_list = st.session_state[f"photos_{g}"]
                 for p in current_list:
-                    # Sync Description
+                    # 先存檔再反轉
                     d_key = f"desc_{g}_{p['id']}"
-                    if d_key in st.session_state:
-                        p['desc'] = st.session_state[d_key]
-                    # Sync Result
+                    if d_key in st.session_state: p['desc'] = st.session_state[d_key]
                     r_key = f"result_{g}_{p['id']}"
-                    if r_key in st.session_state:
-                        p['result'] = st.session_state[r_key]
-                    # Sync Selection
+                    if r_key in st.session_state: p['result'] = st.session_state[r_key]
                     s_key = f"sel_{g}_{p['id']}"
-                    if s_key in st.session_state:
-                        p['selected_opt_index'] = st.session_state[s_key]
+                    if s_key in st.session_state: p['selected_opt_index'] = st.session_state[s_key]
 
                 st.session_state[f"photos_{g}"].reverse()
                 st.rerun()
@@ -621,7 +636,6 @@ if st.session_state['saved_template']:
 
             all_groups_data.append({
                 "group_id": g+1,
-                # context 用於替換 Word 內的變數
                 "context": {
                     "project_name": p_name, "contractor": p_cont, "sub_contractor": p_sub,
                     "location": p_loc, "date": date_display, "check_item": g_item
@@ -629,22 +643,19 @@ if st.session_state['saved_template']:
                 "photos": g_photos_export
             })
 
-    # --- 最終操作區 (移到底部) ---
+    # --- 最終操作區 ---
     st.markdown("---")
     st.subheader("🚀 執行操作")
     
-    # 1. 產生預設檔名 (抓取第 1 組的設定)
+    # 1. 產生預設檔名 (抓取第 1 組的設定來連動)
     default_filename = ""
     if "type_0" in st.session_state:
-        # 使用第 0 組 (第一組) 的工項類型來產生檔名
         default_filename = generate_clean_filename_base(st.session_state["type_0"], base_date)
     else:
-        # 預防萬一還沒選，給個預設值
         default_filename = f"自主檢查表_{get_taiwan_date()}"
 
-    # 2. 顯示檔名輸入框 (只顯示一個，並連動第1組)
+    # 2. 顯示檔名輸入框 (連動更新)
     final_file_name_input = st.text_input("📝 最終 Word 檔名", value=default_filename)
-    # 自動補上 .docx 副檔名
     if not final_file_name_input.endswith(".docx"):
         final_file_name = final_file_name_input + ".docx"
     else:
@@ -666,26 +677,23 @@ if st.session_state['saved_template']:
                     photos = group['photos']
                     context = group['context']
                     
-                    # 每一組切分 batch (通常 8 張一組)
                     for page_idx, i in enumerate(range(0, len(photos), 8)):
                         batch = photos[i : i+8]
                         start_no = i + 1
                         
-                        # 生成單頁 Doc (已包含智慧縮減:若<=4張則砍掉第二頁)
                         current_doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
                         
                         if master_doc is None:
                             master_doc = current_doc
                             composer = Composer(master_doc)
                         else:
-                            # 之後的文檔都附加到主文檔後面 (Composer 會自動處理分頁)
                             composer.append(current_doc)
                 
                 out_buffer = io.BytesIO()
                 composer.save(out_buffer)
                 
                 st.session_state['merged_doc_buffer'] = out_buffer.getvalue()
-                st.session_state['merged_filename'] = final_file_name # 使用剛剛輸入的檔名
+                st.session_state['merged_filename'] = final_file_name
                 
                 st.success(f"✅ 彙整完成！檔名：{final_file_name}")
 
