@@ -2,8 +2,8 @@ import streamlit as st
 try:
     import pkg_resources
 except ImportError:
-    import setuptools
-    
+    import setuptools # 強制引入解決依賴問題
+
 from docx import Document
 from docx.shared import Cm, Pt
 from docx.oxml.ns import qn
@@ -54,142 +54,165 @@ COMMON_SUB_CONTRACTORS = [
     "自行輸入..." 
 ]
 
-# --- 2. 終極內建資料庫 (結構已升級：說明、設計、實測) ---
-# design: 為空字串 "" 代表該項目不需要「設計:」這一行
+# --- 2. 終極內建資料庫 ---
 CHECKS_DB = {
-    "拆除工程-施工 (EA26)": [
-        {"desc": "防護措施:公共管線及環境保護", "design": "", "result": "已完成相關防護措施，管線已封閉/遷移"},
-        {"desc": "安全監測:初始值測量", "design": "", "result": "已完成初始值測量及設置"},
-        {"desc": "防塵作為:灑水或防塵網", "design": "", "result": "現場已設置灑水或防塵網"},
-        {"desc": "降噪作為:低噪音機具", "design": "非衝擊式工法", "result": "使用低噪音機具"},
-        {"desc": "構造物拆除順序", "design": "由上而下", "result": "依施工規劃由上而下拆除"},
-        {"desc": "保留構件:記號保護", "design": "", "result": "保留構件已標示並保護"},
-        {"desc": "拆除物分類", "design": "回收/不可回收/有價", "result": "已依類別分類置放"},
-        {"desc": "車輛輪胎清潔", "design": "無帶污泥出場", "result": "輪胎已清潔"},
-        {"desc": "安全監測數據查核", "design": "傾斜<1/937.5, 沉陷<2cm", "result": "傾斜:___, 沉陷:___cm"},
-        {"desc": "地坪整平清潔", "design": "", "result": "地坪已平整清潔"},
-        {"desc": "廢棄物清運", "design": "", "result": "依核定計畫書執行清運"}
-    ],
-    "拆除工程-有價廢料 (EB26)": [
-        {"desc": "廢鋼筋載運", "design": "", "result": "載運廢鋼筋 * 1 車"},
-        {"desc": "銅線/製品載運", "design": "", "result": "載運銅製品 * 1 車"},
-        {"desc": "電線電纜(含皮)載運", "design": "", "result": "載運電纜 * 1 車"},
-        {"desc": "型鋼載運", "design": "", "result": "載運型鋼 * 1 車"},
-        {"desc": "鋁料載運", "design": "", "result": "載運鋁料 * 1 車"},
-        {"desc": "載運車輛資訊", "design": "", "result": "車號：__________"},
-        {"desc": "重量查核(空車重)", "design": "", "result": "空車重:____kg"},
-        {"desc": "重量查核(總重)", "design": "", "result": "總重:____kg"},
-        {"desc": "重量查核(有價物重)", "design": "", "result": "有價物重:____kg"}
-    ],
-    "擋土排樁工程(排樁)-施工": [
-        {"desc": "放樣樁位檢測", "design": "偏差 ≦3cm", "result": "偏差：____cm"},
-        {"desc": "鑽掘垂直度", "design": "套管內≦1/300, 土內≦1/100", "result": "垂直度符合規定"},
-        {"desc": "鑽掘深度/入岩", "design": "深度≥14.5m, 入岩≥3m", "result": "深度：____m, 入岩：____m"},
-        {"desc": "排樁直徑", "design": "D≥80cm", "result": "D=____cm"},
-        {"desc": "鋼筋籠(主筋/箍筋)", "design": "主筋#10(14支); 箍筋#4@10cm", "result": "主筋支數：____, 箍筋間距：____cm"},
-        {"desc": "鋼筋籠搭接/銲接", "design": "搭接#10=153cm; 銲接4cm", "result": "搭接長度：____cm"},
-        {"desc": "鋼筋間隔器", "design": "@200cm", "result": "間隔器間距：____cm"},
-        {"desc": "特密管埋置深度", "design": "埋置深度≥2M", "result": "埋置深度：____M"},
-        {"desc": "混凝土澆置(樁身)", "design": "fc'=280kgf/cm2; 澆置不中斷", "result": "坍度：____cm, 氯離子：____"},
-        {"desc": "壓梁-鋼筋綁紮", "design": "主筋#7/#6; 箍筋#4@15cm", "result": "綁紮完成符合圖說"},
-        {"desc": "壓梁-模內尺寸", "design": "60*80cm", "result": "尺寸：____*____cm"},
-        {"desc": "壓梁-混凝土澆置", "design": "fc'=210kgf/cm2; 坍度20±4cm", "result": "坍度：____cm"},
-        {"desc": "壓梁-完成面高程", "design": "依施工圖施作 ±3cm", "result": "高程符合規定"},
-        {"desc": "澆置後清潔", "design": "表面平整、無汙染", "result": "已清潔完成"}
-    ],
-    "擋土排樁工程(預壘樁)-施工": [
-        {"desc": "樁心檢測", "design": "D40/D35: ±3cm", "result": "偏差：____cm"},
-        {"desc": "鑽掘垂直度", "design": "≦1/100", "result": "垂直度符合規定"},
-        {"desc": "預壘樁長度/直徑", "design": "L≥6.3m; D=40/35cm", "result": "L=____m, D=____cm"},
-        {"desc": "鋼筋籠(主筋/箍筋)", "design": "主筋#8/#7; 箍筋#4@15cm", "result": "主筋：____, 箍筋：____cm"},
-        {"desc": "鋼筋籠搭接/銲接", "design": "搭接#8=139cm; 銲接4cm", "result": "搭接：____cm"},
-        {"desc": "水泥砂漿試體/壓力", "design": "壓力≥2.1kgf/cm2", "result": "壓力：____kgf/cm2"},
-        {"desc": "澆置間隔時間", "design": "不得超過3分鐘", "result": "間隔：____分"},
-        {"desc": "微型樁鑽掘(垂直/深度)", "design": "10度±3度; L≥7m", "result": "角度：____度, L=____m"},
-        {"desc": "微型樁注漿(水灰比)", "design": "W/C=1:1; ≦10min", "result": "W/C=____, 時間：____min"},
-        {"desc": "微型樁鋼管", "design": "L=7m; 間隔器@2m", "result": "L=____m"},
-        {"desc": "壓梁-鋼筋綁紮", "design": "主筋#6; 箍筋#4@15cm", "result": "符合圖說"},
-        {"desc": "壓梁-模內尺寸", "design": "D40:40x120 / D35:35x60", "result": "尺寸：____x____cm"},
-        {"desc": "壓梁-混凝土澆置", "design": "fc'=210kgf/cm2; 坍度20±4cm", "result": "坍度：____cm"},
-        {"desc": "澆置後清潔", "design": "表面平整、無汙染", "result": "已清潔"}
-    ],
-    "擋土排樁工程(CCP止水樁)-施工": [
-        {"desc": "定位樁心檢測", "design": "±3cm", "result": "偏差：____cm"},
-        {"desc": "鑽掘垂直度", "design": "≦1/40", "result": "符合規定"},
-        {"desc": "止水樁長度", "design": "L≥14.5m", "result": "L=____m"},
-        {"desc": "止水樁直徑", "design": "D≥30cm", "result": "D=____cm"},
-        {"desc": "水泥漿水灰比", "design": "W/C=1:1", "result": "W/C=____"},
-        {"desc": "注漿壓力值", "design": "≥180kgf/cm2", "result": "壓力：____kgf/cm2"},
-        {"desc": "澆置後清潔", "design": "", "result": "已清潔"}
-    ],
-    "擋土排樁工程-材料": [
-        {"desc": "證明文件查核", "design": "出廠證明/檢驗紀錄", "result": "文件齊全"},
-        {"desc": "規格尺寸檢查", "design": "符合契約規範及訂貨規格", "result": "符合規定"},
-        {"desc": "外觀形狀檢查", "design": "無碰撞變形、破損、裂痕", "result": "外觀良好"},
-        {"desc": "工地放置檢查", "design": "分類置放並標幟、底部墊高", "result": "堆置良好"},
-        {"desc": "取樣試驗", "design": "依規範取樣", "result": "已取樣/不需取樣"}
-    ],
-    "微型樁工程-施工 (EA53)": [
-        {"desc": "開挖前置:管線確認", "design": "", "result": "確認無地下管線干擾"},
-        {"desc": "樁心檢測", "design": "≦3cm", "result": "偏差：____cm"},
-        {"desc": "鑽掘垂直度", "design": "0-5度", "result": "符合規定"},
-        {"desc": "鑽掘尺寸 (深度/樁徑)", "design": "深度≧16m; 樁徑≧15cm", "result": "D=____m, dia=____cm"},
-        {"desc": "鑽掘間距", "design": "@60cm, 交錯施工", "result": "間距：____cm"},
-        {"desc": "水泥漿拌合比", "design": "W/C=1:1", "result": "W/C=____"},
-        {"desc": "注漿作業", "design": "≦10min，注漿至帽梁底部", "result": "時間：____min"},
-        {"desc": "鋼管吊放安裝", "design": "長度16m; 間隔器@2m", "result": "長度：____m"},
-        {"desc": "廢漿清除", "design": "", "result": "已清除硬固廢漿"},
-        {"desc": "樁頂劣質打石", "design": "", "result": "劣質混凝土已打除"},
-        {"desc": "帽梁鋼筋綁紮", "design": "主筋#6-4支, 箍筋#3@20cm", "result": "符合圖說"},
-        {"desc": "帽梁灌漿", "design": "fc'=210kgf/cm2", "result": "強度符合"}
-    ],
-    "微型樁工程-材料 (EB53)": [
-        {"desc": "證明文件", "design": "出廠證明/檢驗紀錄齊全", "result": "文件齊全"},
-        {"desc": "規格尺寸", "design": "符合契約規範", "result": "符合規定"},
-        {"desc": "外觀形狀", "design": "無碰撞變形", "result": "外觀良好"},
-        {"desc": "工地放置", "design": "分類堆置/標示", "result": "堆置良好"},
-        {"desc": "取樣試驗", "design": "依規範取樣", "result": "已取樣"}
-    ],
-    "假設工程-施工 (EA51)": [
-        {"desc": "放樣", "design": "依施工圖說放樣", "result": "符合圖說"},
-        {"desc": "全阻式圍籬組立", "design": "間距/埋入深度符合規定", "result": "符合規定"},
-        {"desc": "半阻式圍籬組立", "design": "間距/埋入深度符合規定", "result": "符合規定"},
-        {"desc": "防溢座施作", "design": "混凝土210kgf/cm2", "result": "已施作"},
-        {"desc": "出入口地坪(鋼筋/澆置)", "design": "厚度20cm; 雙層雙向#4@10cm", "result": "厚度：____cm"},
-        {"desc": "大門安裝", "design": "尺寸及埋入深度符合規定", "result": "符合規定"},
-        {"desc": "安全走廊", "design": "高300寬150cm", "result": "尺寸：____*____cm"},
-        {"desc": "警示燈設置", "design": "間距符合規定", "result": "已設置"},
-        {"desc": "洗車台尺寸檢查", "design": "500x522cm; 沉沙池深170cm", "result": "尺寸符合"},
-        {"desc": "圍籬綠化維護", "design": "存活率90%以上", "result": "存活率：____%"}
-    ],
-    "假設工程-材料 (EB51)": [
-        {"desc": "證明文件", "design": "出廠證明/檢驗紀錄齊全", "result": "文件齊全"},
-        {"desc": "外觀形狀", "design": "無碰撞變形、破損", "result": "外觀良好"},
-        {"desc": "工地放置", "design": "分類堆置/標示", "result": "堆置良好"},
-        {"desc": "預鑄水溝尺寸", "design": "內溝寬30±5cm, 深40±5cm", "result": "寬：____cm, 深：____cm"}
-    ],
-    "車道拓寬工程 (EA52)": [
-        {"desc": "碎石級配舖設", "design": "級配高度 20cm", "result": "高度：____cm"},
-        {"desc": "鋼筋綁紮", "design": "箍筋#4@20cm; 保護層4cm", "result": "間距：____cm"},
-        {"desc": "模板組立", "design": "牆厚20cm; 垂直度±13mm", "result": "牆厚：____cm"},
-        {"desc": "混凝土澆置(結構)", "design": "強度 210kgf/cm2", "result": "強度符合"},
-        {"desc": "粉刷面清潔", "design": "無殘餘雜物、凸出物", "result": "清潔完成"},
-        {"desc": "基準灰誌製作", "design": "間距不大於1M", "result": "間距符合"},
-        {"desc": "馬賽克磚舖貼", "design": "顏色與樣板相同", "result": "顏色相符"},
-        {"desc": "瀝青混凝土舖設", "design": "密級配，無汙損浮起", "result": "鋪設完成"}
-    ],
-    "混凝土工程 (共用)": [
-        {"desc": "照明與雨天防護", "design": "照明充足，備有防雨材", "result": "已備妥"},
-        {"desc": "澆置前清潔濕潤", "design": "垃圾清除，模板濕潤", "result": "已清潔"},
-        {"desc": "模板振動器", "design": "備有至少二具", "result": "數量：____具"},
-        {"desc": "澆置時間控制", "design": "拌合至澆置90分鐘內", "result": "時間：____分"},
-        {"desc": "坍度/流度檢查", "design": "符合設計 (如 18±4cm)", "result": "坍度：____cm"},
-        {"desc": "溫度檢查", "design": "13~32度C", "result": "溫度：____度C"},
-        {"desc": "氯離子含量", "design": "小於 0.15 kg/m3", "result": "含量：____kg/m3"},
-        {"desc": "試體取樣", "design": "每100m3取樣1組", "result": "已取樣"},
-        {"desc": "振動搗實", "design": "間距<50cm; 每次5-10秒", "result": "搗實確實"},
-        {"desc": "養護作業", "design": "灑水或覆蓋養護", "result": "養護中"}
-    ]
+    "拆除工程-施工 (EA26)": {
+        "items": [
+            {"desc": "防護措施:公共管線及環境保護", "design": "", "result": "已完成相關防護措施，管線已封閉/遷移"},
+            {"desc": "安全監測:初始值測量", "design": "", "result": "已完成初始值測量及設置"},
+            {"desc": "防塵作為:灑水或防塵網", "design": "", "result": "現場已設置灑水或防塵網"},
+            {"desc": "降噪作為:低噪音機具", "design": "非衝擊式工法", "result": "使用低噪音機具"},
+            {"desc": "構造物拆除順序", "design": "由上而下", "result": "依施工規劃由上而下拆除"},
+            {"desc": "保留構件:記號保護", "design": "", "result": "保留構件已標示並保護"},
+            {"desc": "拆除物分類", "design": "回收/不可回收/有價", "result": "已依類別分類置放"},
+            {"desc": "車輛輪胎清潔", "design": "無帶污泥出場", "result": "輪胎已清潔"},
+            {"desc": "安全監測數據查核", "design": "傾斜<1/937.5, 沉陷<2cm", "result": "傾斜:___, 沉陷:___cm"},
+            {"desc": "地坪整平清潔", "design": "", "result": "地坪已平整清潔"},
+            {"desc": "廢棄物清運", "design": "", "result": "依核定計畫書執行清運"}
+        ]
+    },
+    "拆除工程-有價廢料 (EB26)": {
+        "items": [
+            {"desc": "廢鋼筋載運", "design": "", "result": "載運廢鋼筋 * 1 車"},
+            {"desc": "銅線/製品載運", "design": "", "result": "載運銅製品 * 1 車"},
+            {"desc": "電線電纜(含皮)載運", "design": "", "result": "載運電纜 * 1 車"},
+            {"desc": "型鋼載運", "design": "", "result": "載運型鋼 * 1 車"},
+            {"desc": "鋁料載運", "design": "", "result": "載運鋁料 * 1 車"},
+            {"desc": "載運車輛資訊", "design": "", "result": "車號：__________"},
+            {"desc": "重量查核(空車重)", "design": "", "result": "空車重:____kg"},
+            {"desc": "重量查核(總重)", "design": "", "result": "總重:____kg"},
+            {"desc": "重量查核(有價物重)", "design": "", "result": "有價物重:____kg"}
+        ]
+    },
+    "擋土排樁工程(排樁)-施工": {
+        "items": [
+            {"desc": "放樣樁位檢測", "design": "偏差 ≦3cm", "result": "偏差：____cm"},
+            {"desc": "鑽掘垂直度", "design": "套管內≦1/300, 土內≦1/100", "result": "垂直度符合規定"},
+            {"desc": "鑽掘深度/入岩", "design": "深度≥14.5m, 入岩≥3m", "result": "深度：____m, 入岩：____m"},
+            {"desc": "排樁直徑", "design": "D≥80cm", "result": "D=____cm"},
+            {"desc": "鋼筋籠(主筋/箍筋)", "design": "主筋#10(14支); 箍筋#4@10cm", "result": "主筋支數：____, 箍筋間距：____cm"},
+            {"desc": "鋼筋籠搭接/銲接", "design": "搭接#10=153cm; 銲接4cm", "result": "搭接長度：____cm"},
+            {"desc": "鋼筋間隔器", "design": "@200cm", "result": "間隔器間距：____cm"},
+            {"desc": "特密管埋置深度", "design": "埋置深度≥2M", "result": "埋置深度：____M"},
+            {"desc": "混凝土澆置(樁身)", "design": "fc'=280kgf/cm2; 澆置不中斷", "result": "坍度：____cm, 氯離子：____"},
+            {"desc": "壓梁-鋼筋綁紮", "design": "主筋#7/#6; 箍筋#4@15cm", "result": "綁紮完成符合圖說"},
+            {"desc": "壓梁-模內尺寸", "design": "60*80cm", "result": "尺寸：____*____cm"},
+            {"desc": "壓梁-混凝土澆置", "design": "fc'=210kgf/cm2; 坍度20±4cm", "result": "坍度：____cm"},
+            {"desc": "壓梁-完成面高程", "design": "依施工圖施作 ±3cm", "result": "高程符合規定"},
+            {"desc": "澆置後清潔", "design": "表面平整、無汙染", "result": "已清潔完成"}
+        ]
+    },
+    "擋土排樁工程(預壘樁)-施工": {
+        "items": [
+            {"desc": "樁心檢測", "design": "D40/D35: ±3cm", "result": "偏差：____cm"},
+            {"desc": "鑽掘垂直度", "design": "≦1/100", "result": "垂直度符合規定"},
+            {"desc": "預壘樁長度/直徑", "design": "L≥6.3m; D=40/35cm", "result": "L=____m, D=____cm"},
+            {"desc": "鋼筋籠(主筋/箍筋)", "design": "主筋#8/#7; 箍筋#4@15cm", "result": "主筋：____, 箍筋：____cm"},
+            {"desc": "鋼筋籠搭接/銲接", "design": "搭接#8=139cm; 銲接4cm", "result": "搭接：____cm"},
+            {"desc": "水泥砂漿試體/壓力", "design": "壓力≥2.1kgf/cm2", "result": "壓力：____kgf/cm2"},
+            {"desc": "澆置間隔時間", "design": "不得超過3分鐘", "result": "間隔：____分"},
+            {"desc": "微型樁鑽掘(垂直/深度)", "design": "10度±3度; L≥7m", "result": "角度：____度, L=____m"},
+            {"desc": "微型樁注漿(水灰比)", "design": "W/C=1:1; ≦10min", "result": "W/C=____, 時間：____min"},
+            {"desc": "微型樁鋼管", "design": "L=7m; 間隔器@2m", "result": "L=____m"},
+            {"desc": "壓梁-鋼筋綁紮", "design": "主筋#6; 箍筋#4@15cm", "result": "符合圖說"},
+            {"desc": "壓梁-模內尺寸", "design": "D40:40x120 / D35:35x60", "result": "尺寸：____x____cm"},
+            {"desc": "壓梁-混凝土澆置", "design": "fc'=210kgf/cm2; 坍度20±4cm", "result": "坍度：____cm"},
+            {"desc": "澆置後清潔", "design": "表面平整、無汙染", "result": "已清潔"}
+        ]
+    },
+    "擋土排樁工程(CCP止水樁)-施工": {
+        "items": [
+            {"desc": "定位樁心檢測", "design": "±3cm", "result": "偏差：____cm"},
+            {"desc": "鑽掘垂直度", "design": "≦1/40", "result": "符合規定"},
+            {"desc": "止水樁長度", "design": "L≥14.5m", "result": "L=____m"},
+            {"desc": "止水樁直徑", "design": "D≥30cm", "result": "D=____cm"},
+            {"desc": "水泥漿水灰比", "design": "W/C=1:1", "result": "W/C=____"},
+            {"desc": "注漿壓力值", "design": "≥180kgf/cm2", "result": "壓力：____kgf/cm2"},
+            {"desc": "澆置後清潔", "design": "", "result": "已清潔"}
+        ]
+    },
+    "擋土排樁工程-材料": {
+        "items": [
+            {"desc": "證明文件查核", "design": "出廠證明/檢驗紀錄", "result": "文件齊全"},
+            {"desc": "規格尺寸檢查", "design": "符合契約規範及訂貨規格", "result": "符合規定"},
+            {"desc": "外觀形狀檢查", "design": "無碰撞變形、破損、裂痕", "result": "外觀良好"},
+            {"desc": "工地放置檢查", "design": "分類置放並標幟、底部墊高", "result": "堆置良好"},
+            {"desc": "取樣試驗", "design": "依規範取樣", "result": "已取樣/不需取樣"}
+        ]
+    },
+    "微型樁工程-施工 (EA53)": {
+        "items": [
+            {"desc": "開挖前置:管線確認", "design": "", "result": "確認無地下管線干擾"},
+            {"desc": "樁心檢測", "design": "≦3cm", "result": "偏差：____cm"},
+            {"desc": "鑽掘垂直度", "design": "0-5度", "result": "符合規定"},
+            {"desc": "鑽掘尺寸 (深度/樁徑)", "design": "深度≧16m; 樁徑≧15cm", "result": "D=____m, dia=____cm"},
+            {"desc": "鑽掘間距", "design": "@60cm, 交錯施工", "result": "間距：____cm"},
+            {"desc": "水泥漿拌合比", "design": "W/C=1:1", "result": "W/C=____"},
+            {"desc": "注漿作業", "design": "≦10min，注漿至帽梁底部", "result": "時間：____min"},
+            {"desc": "鋼管吊放安裝", "design": "長度16m; 間隔器@2m", "result": "長度：____m"},
+            {"desc": "廢漿清除", "design": "", "result": "已清除硬固廢漿"},
+            {"desc": "樁頂劣質打石", "design": "", "result": "劣質混凝土已打除"},
+            {"desc": "帽梁鋼筋綁紮", "design": "主筋#6-4支, 箍筋#3@20cm", "result": "符合圖說"},
+            {"desc": "帽梁灌漿", "design": "fc'=210kgf/cm2", "result": "強度符合"}
+        ]
+    },
+    "微型樁工程-材料 (EB53)": {
+        "items": [
+            {"desc": "證明文件", "design": "出廠證明/檢驗紀錄齊全", "result": "文件齊全"},
+            {"desc": "規格尺寸", "design": "符合契約規範", "result": "符合規定"},
+            {"desc": "外觀形狀", "design": "無碰撞變形", "result": "外觀良好"},
+            {"desc": "工地放置", "design": "分類堆置/標示", "result": "堆置良好"},
+            {"desc": "取樣試驗", "design": "依規範取樣", "result": "已取樣"}
+        ]
+    },
+    "假設工程-施工 (EA51)": {
+        "items": [
+            {"desc": "放樣", "design": "依施工圖說放樣", "result": "符合圖說"},
+            {"desc": "全阻式圍籬組立", "design": "間距/埋入深度符合規定", "result": "符合規定"},
+            {"desc": "半阻式圍籬組立", "design": "間距/埋入深度符合規定", "result": "符合規定"},
+            {"desc": "防溢座施作", "design": "混凝土210kgf/cm2", "result": "已施作"},
+            {"desc": "出入口地坪(鋼筋/澆置)", "design": "厚度20cm; 雙層雙向#4@10cm", "result": "厚度：____cm"},
+            {"desc": "大門安裝", "design": "尺寸及埋入深度符合規定", "result": "符合規定"},
+            {"desc": "安全走廊", "design": "高300寬150cm", "result": "尺寸：____*____cm"},
+            {"desc": "警示燈設置", "design": "間距符合規定", "result": "已設置"},
+            {"desc": "洗車台尺寸檢查", "design": "500x522cm; 沉沙池深170cm", "result": "尺寸符合"},
+            {"desc": "圍籬綠化維護", "design": "存活率90%以上", "result": "存活率：____%"}
+        ]
+    },
+    "假設工程-材料 (EB51)": {
+        "items": [
+            {"desc": "證明文件", "design": "出廠證明/檢驗紀錄齊全", "result": "文件齊全"},
+            {"desc": "外觀形狀", "design": "無碰撞變形、破損", "result": "外觀良好"},
+            {"desc": "工地放置", "design": "分類堆置/標示", "result": "堆置良好"},
+            {"desc": "預鑄水溝尺寸", "design": "內溝寬30±5cm, 深40±5cm", "result": "寬：____cm, 深：____cm"}
+        ]
+    },
+    "車道拓寬工程 (EA52)": {
+        "items": [
+            {"desc": "碎石級配舖設", "design": "級配高度 20cm", "result": "高度：____cm"},
+            {"desc": "鋼筋綁紮", "design": "箍筋#4@20cm; 保護層4cm", "result": "間距：____cm"},
+            {"desc": "模板組立", "design": "牆厚20cm; 垂直度±13mm", "result": "牆厚：____cm"},
+            {"desc": "混凝土澆置(結構)", "design": "強度 210kgf/cm2", "result": "強度符合"},
+            {"desc": "粉刷面清潔", "design": "無殘餘雜物、凸出物", "result": "清潔完成"},
+            {"desc": "基準灰誌製作", "design": "間距不大於1M", "result": "間距符合"},
+            {"desc": "馬賽克磚舖貼", "design": "顏色與樣板相同", "result": "顏色相符"},
+            {"desc": "瀝青混凝土舖設", "design": "密級配，無汙損浮起", "result": "鋪設完成"}
+        ]
+    },
+    "混凝土工程 (共用)": {
+        "items": [
+            {"desc": "照明與雨天防護", "design": "照明充足，備有防雨材", "result": "已備妥"},
+            {"desc": "澆置前清潔濕潤", "design": "垃圾清除，模板濕潤", "result": "已清潔"},
+            {"desc": "模板振動器", "design": "備有至少二具", "result": "數量：____具"},
+            {"desc": "澆置時間控制", "design": "拌合至澆置90分鐘內", "result": "時間：____分"},
+            {"desc": "坍度/流度檢查", "design": "符合設計 (如 18±4cm)", "result": "坍度：____cm"},
+            {"desc": "溫度檢查", "design": "13~32度C", "result": "溫度：____度C"},
+            {"desc": "氯離子含量", "design": "小於 0.15 kg/m3", "result": "含量：____kg/m3"},
+            {"desc": "試體取樣", "design": "每100m3取樣1組", "result": "已取樣"},
+            {"desc": "振動搗實", "design": "間距<50cm; 每次5-10秒", "result": "搗實確實"},
+            {"desc": "養護作業", "design": "灑水或覆蓋養護", "result": "養護中"}
+        ]
+    }
 }
 
 # --- 3. 核心功能 ---
@@ -286,16 +309,25 @@ def remove_element(element):
     if parent is not None:
         parent.remove(element)
 
+# --- 核心修改：徹底砍掉分頁符號之後的所有內容，且保留 sectPr ---
 def truncate_doc_after_page_break(doc):
     body = doc.element.body
     break_index = -1
+    
+    # 找分頁符號
     for i, element in enumerate(body):
         if element.tag.endswith('p'):
             if 'w:br' in element.xml and 'type="page"' in element.xml:
                 break_index = i
                 break
+    
+    # 執行刪除，但保留邊界設定 (sectPr)
     if break_index != -1:
+        # 從最後往前刪
         for i in range(len(body) - 1, break_index - 1, -1):
+            # 關鍵修正：如果遇到 'sectPr' (邊界設定)，跳過不刪！
+            if body[i].tag.endswith('sectPr'):
+                continue
             remove_element(body[i])
 
 def cleanup_template_for_short_report(doc, num_photos):
@@ -319,16 +351,13 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             
             spacer = "\u3000" * 4
             
-            # --- FIX: Word 內容生成邏輯 (加入設計欄位) ---
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
             
-            # 只有當 'design' 有內容時，才加入這行
             if data.get('design'):
                 info_text += f"設計：{data['design']}\n"
                 
             info_text += f"實測：{data['result']}"
-            # ----------------------------------------
             
             replace_text_content(doc, {info_key: info_text})
         else:
@@ -421,6 +450,7 @@ def add_new_photos(g_idx, uploaded_files):
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
     
+    # 不排序、不反轉，完全依照瀏覽器給的原始順序
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
