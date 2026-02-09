@@ -243,11 +243,18 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 (修正版：支援選擇伺服器) ---
-def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, receiver_email, service_provider):
+# --- Email 寄送功能 (自動讀取 Secrets 版) ---
+def send_email_with_zip(zip_bytes, filename, receiver_email, service_provider):
     """
-    依據使用者選擇的服務商設定 SMTP
+    依據使用者選擇的服務商設定 SMTP，並自動從 st.secrets 抓取帳密
     """
+    try:
+        # ✅ 從系統後台讀取帳號與密碼 (資安保護)
+        sender_email = st.secrets["email"]["account"]
+        sender_password = st.secrets["email"]["password"]
+    except Exception:
+        return False, "❌ 無法讀取帳密！請確認是否已在 Streamlit Secrets 後台設定 [email] 區塊。"
+
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
@@ -267,8 +274,7 @@ def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, rece
     elif service_provider == "Outlook / Office 365":
         smtp_server = 'smtp.office365.com'
         smtp_port = 587
-    else: # 自訂
-        st.error("目前尚未開放自訂 SMTP")
+    else: 
         return False, "設定錯誤"
 
     try:
@@ -282,9 +288,9 @@ def send_email_with_zip(zip_bytes, filename, sender_email, sender_password, rece
     except smtplib.SMTPAuthenticationError:
         error_msg = "❌ 認證失敗！"
         if service_provider == "Gmail":
-            error_msg += "\n請確認是否使用了「應用程式密碼」 (非登入密碼)。"
+            error_msg += "\n請確認密碼是否使用了 16 碼的「應用程式密碼」。"
         elif service_provider == "Outlook / Office 365":
-            error_msg += "\n請確認您的 Outlook 帳號密碼是否正確，或是否開啟了雙重驗證。"
+            error_msg += "\n請確認 Outlook 密碼是否正確，或是否被雙重驗證阻擋。"
         return False, error_msg
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
@@ -319,7 +325,7 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (企業信箱支援版)")
+st.title("🏗️ 工程自主檢查表 (自動寄信支援版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -327,11 +333,6 @@ if 'zip_filename' not in st.session_state: st.session_state['zip_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
-# Email記憶
-if 'email_sender' not in st.session_state: st.session_state['email_sender'] = ""
-if 'email_password' not in st.session_state: st.session_state['email_password'] = ""
-if 'email_receiver' not in st.session_state: st.session_state['email_receiver'] = ""
-if 'email_provider' not in st.session_state: st.session_state['email_provider'] = "Outlook / Office 365" # 預設改為 Outlook
 
 DEFAULT_TEMPLATE_PATH = "template.docx"
 if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
@@ -479,7 +480,7 @@ if st.session_state['saved_template']:
                             if field == 'sel': st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
 
                         field_map = {'desc': 'desc', 'result': 'result'}
-                        desc_key, result_key = f"desc_{g}_{pid}", f"result_{g}_{pid}"
+                        desc_key, result_key = f"desc_{g}_{pid}"
                         if desc_key not in st.session_state: st.session_state[desc_key] = photo_data['desc']
                         if result_key not in st.session_state: st.session_state[result_key] = photo_data['result']
 
@@ -538,57 +539,30 @@ if st.session_state['saved_template']:
         with col_dl:
             st.download_button(label="📥 下載 ZIP 檔案", data=st.session_state['zip_buffer'], file_name=st.session_state['zip_filename'], mime="application/zip", use_container_width=True)
             
-            subject = f"工程自主檢查表_{datetime.date.today()}"
-            body = "請查收附件 ZIP 檔案。"
-            mailto_link = f"mailto:?subject={subject}&body={body}"
-            st.markdown(f"""
-            <a href="{mailto_link}" target="_blank" style="text-decoration:none;">
-                <button style="width:100%; border:1px solid #ccc; background:white; color:black; padding:0.5rem; border-radius:5px; cursor:pointer;">
-                    📧 手動開啟 Email App (需自行附加檔案)
-                </button>
-            </a>
-            """, unsafe_allow_html=True)
-
         with col_mail:
             with st.expander("🤖 自動寄送 Email (免下載)", expanded=True):
-                # 記憶輸入的 Email 資訊
-                def update_email_info():
-                    st.session_state['email_sender'] = st.session_state['input_sender']
-                    st.session_state['email_password'] = st.session_state['input_password']
-                    st.session_state['email_receiver'] = st.session_state['input_receiver']
-                    st.session_state['email_provider'] = st.session_state['input_provider']
-
-                # 1. 選擇服務商
-                provider = st.selectbox(
-                    "選擇郵件伺服器", 
-                    ["Gmail", "Outlook / Office 365"], 
-                    index=1 if st.session_state['email_provider'] == "Outlook / Office 365" else 0,
-                    key='input_provider',
-                    on_change=update_email_info
-                )
-
-                receiver = st.text_input("收件者 Email", value=st.session_state['email_receiver'], key='input_receiver', on_change=update_email_info)
-                sender = st.text_input(
-                    "寄件者 Email (您的帳號)", 
-                    value=st.session_state['email_sender'], 
-                    key='input_sender', 
-                    placeholder="例如: user@fengyu.com.tw",
-                    on_change=update_email_info
-                )
+                st.info("💡 系統將自動讀取後台設定的帳戶進行寄信，無須輸入密碼。")
                 
-                # 根據選擇顯示提示
-                pwd_label = "應用程式密碼" if provider == "Gmail" else "登入密碼"
-                pwd_help = "Gmail 需使用應用程式密碼；Outlook 通常使用登入密碼。"
+                # 保留選擇寄信伺服器，但不再要求填寫寄件人帳密
+                provider = st.selectbox("選擇您的寄件伺服器", ["Gmail", "Outlook / Office 365"], index=0)
                 
-                password = st.text_input(pwd_label, value=st.session_state['email_password'], type="password", key='input_password', help=pwd_help, on_change=update_email_info)
+                # 收件人可自行填寫或設計下拉選單
+                receiver = st.text_input("收件者 Email", value="office@company.com")
                 
-                if st.button("📤 發送郵件"):
-                    if not receiver or not sender or not password:
-                        st.error("請填寫完整資訊")
+                if st.button("📤 立即發送", type="primary"):
+                    if not receiver:
+                        st.error("請填寫收件者 Email")
                     else:
-                        success, msg = send_email_with_zip(st.session_state['zip_buffer'], st.session_state['zip_filename'], sender, password, receiver, provider)
-                        if success: st.success(msg)
-                        else: st.error(msg)
-
+                        with st.spinner("📨 傳送至辦公室中..."):
+                            success, msg = send_email_with_zip(
+                                st.session_state['zip_buffer'], 
+                                st.session_state['zip_filename'], 
+                                receiver, 
+                                provider
+                            )
+                            if success: 
+                                st.success(msg)
+                            else: 
+                                st.error(msg)
 else:
     st.info("👈 請先在左側確認 Word 樣板")
