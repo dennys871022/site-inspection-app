@@ -7,7 +7,7 @@ except ImportError:
 from docx import Document
 from docx.shared import Cm, Pt
 from docx.oxml.ns import qn
-from docxcompose.composer import Composer # 這是合併檔案的關鍵
+from docxcompose.composer import Composer
 from PIL import Image
 import io
 import datetime
@@ -244,30 +244,34 @@ def remove_element(element):
     if parent is not None:
         parent.remove(element)
 
+# --- 核心修改：智慧刪除第二頁 ---
 def cleanup_template_for_short_report(doc, num_photos):
+    """
+    如果照片數量 <= 4，刪除分頁符號及之後的所有內容 (包含第二頁的專案資訊)
+    """
     if num_photos > 4:
         return 
     
-    placeholders_to_remove = [f"{{img_{i}}}" for i in range(5, 9)] + \
-                             [f"{{info_{i}}}" for i in range(5, 9)]
+    body = doc.element.body
+    found_break = False
+    elements_to_remove = []
     
-    for table in list(doc.tables): 
-        for row in list(table.rows):
-            row_text = ""
-            for cell in row.cells:
-                row_text += cell.text
-            if any(ph in row_text for ph in placeholders_to_remove):
-                remove_element(row._element)
-                
-    for paragraph in list(doc.paragraphs):
-        if any(ph in paragraph.text for ph in placeholders_to_remove):
-            remove_element(paragraph._element)
-            
-    for p in doc.paragraphs:
-        if p.runs:
-            for r in p.runs:
-                if 'w:br' in r._element.xml and 'type="page"' in r._element.xml:
-                    remove_element(r._element)
+    # 遍歷文檔中的所有元素 (段落、表格...)
+    for element in body:
+        # 如果已經找到分頁符號，後面的全部加入刪除名單
+        if found_break:
+            elements_to_remove.append(element)
+            continue
+        
+        # 檢查段落中是否包含分頁符號
+        if element.tag.endswith('p'):
+            if 'w:type="page"' in element.xml:
+                found_break = True
+                elements_to_remove.append(element) # 分頁符號本身也要刪除
+    
+    # 執行刪除
+    for el in elements_to_remove:
+        remove_element(el)
 
 def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
@@ -292,10 +296,10 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
         else:
             pass 
 
-    # 3. 智慧縮減 (刪除多餘頁面)
+    # 3. 智慧縮減 (刪除第二頁)
     cleanup_template_for_short_report(doc, len(photo_batch))
     
-    # 4. 清理剩餘佔位符
+    # 4. 清理剩餘佔位符 (預防萬一還有殘留)
     final_clean = {}
     for i in range(1, 9):
         final_clean[f"{{img_{i}}}"] = ""
@@ -330,7 +334,7 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 (更新為傳送單一 .docx) ---
+# --- Email 寄送功能 ---
 def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     try:
         sender_email = st.secrets["email"]["account"]
@@ -341,7 +345,7 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
-    msg['Subject'] = f"[自動回報] {filename.replace('.docx', '')}" # 標題去掉副檔名
+    msg['Subject'] = f"[自動回報] {filename.replace('.docx', '')}"
     
     body = f"""
     收件人：{receiver_name}
@@ -353,7 +357,6 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     """
     msg.attach(MIMEText(body, 'plain'))
     
-    # 附件類型改為 Word
     part = MIMEApplication(doc_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
@@ -377,6 +380,7 @@ def add_new_photos(g_idx, uploaded_files):
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
     
+    # 不排序、不反轉，完全依照瀏覽器給的原始順序
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
@@ -646,40 +650,30 @@ if st.session_state['saved_template']:
             st.error("⚠️ 請至少上傳一張照片並填寫資料")
         else:
             with st.spinner("📦 正在生成並合併 Word 檔案..."):
-                # --- 重大修改：使用 Composer 合併檔案 ---
                 master_doc = None
                 composer = None
                 
                 for group in all_groups_data:
                     photos = group['photos']
                     context = group['context']
-                    # 每一組可能因為照片多寡產生 1 或 2 頁 (或更多)
-                    # 我們這裡假設每組只會用到一次 generate_single_page (處理 8 張)
-                    # 如果單組超過 8 張，您原本的邏輯是切分 batch，這裡沿用
                     
                     for page_idx, i in enumerate(range(0, len(photos), 8)):
                         batch = photos[i : i+8]
                         start_no = i + 1
                         
-                        # 生成這一頁的 Doc (已包含智慧縮減)
                         current_doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
                         
                         if master_doc is None:
-                            # 第一個生成的文檔當作主文檔
                             master_doc = current_doc
                             composer = Composer(master_doc)
                         else:
-                            # 之後的文檔都附加到主文檔後面
-                            # 注意：docxcompose 會自動處理分頁符號
                             composer.append(current_doc)
                 
-                # 儲存合併後的檔案
                 out_buffer = io.BytesIO()
                 composer.save(out_buffer)
                 
                 st.session_state['merged_doc_buffer'] = out_buffer.getvalue()
                 
-                # 設定合併後的檔名
                 roc_year = base_date.year - 1911
                 date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
                 st.session_state['merged_filename'] = f"自主檢查表彙整_{date_str}.docx"
