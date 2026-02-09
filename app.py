@@ -326,11 +326,10 @@ def add_new_photos(g_idx, uploaded_files):
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
     
-    # --- FIX: 移除自動排序，保留原始上傳順序 ---
-    # uploaded_files.sort(key=lambda x: x.name) <--- 刪除這行
-    # ----------------------------------------
-
-    for f in uploaded_files:
+    # --- FIX: 加入倒轉順序的機制，抵銷手機「堆疊式」上傳的問題 ---
+    # 大部分手機瀏覽器在多選時，會把第一張選的放在最後面傳送 (LIFO)
+    # 所以我們把收到的列表反轉，就能變回「先選先贏」的順序
+    for f in reversed(uploaded_files):
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
             current_list.append({
@@ -479,7 +478,6 @@ if st.session_state['saved_template']:
             
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
         
-        # 恢復 accept_multiple_files=True
         new_files = st.file_uploader(
             f"點擊此處選擇照片 (第 {g+1} 組)", 
             type=['jpg','png','jpeg'], 
