@@ -10,7 +10,7 @@ import os
 import zipfile
 import pandas as pd
 import smtplib
-import re  # <--- 新增這個，用來處理括號移動
+import re
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -20,7 +20,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 設定收件人名單 ---
+# --- 1. 設定收件人名單 (已更新) ---
 RECIPIENTS = {
     "范嘉文": "ses543212004@fengyu.com.tw",
     "林憲睿": "dennys871022@fengyu.com.tw",
@@ -37,7 +37,7 @@ RECIPIENTS = {
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
-# --- 常用協力廠商名單 ---
+# --- 常用協力廠商名單 (已更新) ---
 COMMON_SUB_CONTRACTORS = [
     "川峻工程有限公司",
     "世銓營造股份有限公司",
@@ -71,7 +71,7 @@ CHECKS_DB = {
         ],
         "results": [
             "載運廢鋼筋 * 1 車", "載運銅製品 * 1 車", "載運電纜 * 1 車", "載運型鋼 * 1 車", 
-            "載運鋁料 * 1 車", "車號：__________", "空車重:____kg", "總重:____kg","有價物重:____kg"
+            "載運鋁料 * 1 車", "車號：__________", "空車重:____kg", "總重:____kg", "有價物重:____kg"
         ]
     },
     "擋土排樁工程(排樁)-施工": {
@@ -255,10 +255,7 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
     return doc
 
 def generate_names(selected_type, base_date):
-    # 1. 先去除 (EA26) 等代號
     clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
-    
-    # 2. 判斷基本後綴
     suffix = "自主檢查"
     if "施工" in clean_type or "混凝土" in clean_type:
         suffix = "施工自主檢查"
@@ -270,13 +267,11 @@ def generate_names(selected_type, base_date):
         suffix = "有價廢料清運自主檢查"
         clean_type = clean_type.replace("-有價廢料", "")
     
-    # 3. 處理括號位置：將 (xxx) 移到最後面
-    # 例如：擋土排樁工程(預壘樁) -> 擋土排樁工程 + Suffix + (預壘樁)
     match = re.search(r'(\(.*\))', clean_type)
     extra_info = ""
     if match:
-        extra_info = match.group(1) # 抓取括號內容
-        clean_type = clean_type.replace(extra_info, "").strip() # 從主名稱移除，並去除多餘空白
+        extra_info = match.group(1) 
+        clean_type = clean_type.replace(extra_info, "").strip() 
         
     full_item_name = f"{clean_type}{suffix}{extra_info}"
     
@@ -527,10 +522,11 @@ if st.session_state['saved_template']:
 
                         st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
 
-                        def on_text_change(field, pk=pid, idx=i):
-                            val = st.session_state[f"{field}_{g}_{pk}"]
-                            st.session_state[f"photos_{g}"][idx][field_map[field]] = val
-                            if field == 'sel': st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
+                        # --- 修復重點：加入 gk=g 來綁定當下的組別變數，解決 KeyError ---
+                        def on_text_change(field, pk=pid, idx=i, gk=g): 
+                            val = st.session_state[f"{field}_{gk}_{pk}"]
+                            st.session_state[f"photos_{gk}"][idx][field_map[field]] = val
+                            if field == 'sel': st.session_state[f"photos_{gk}"][idx]['selected_opt_index'] = val
 
                         field_map = {'desc': 'desc', 'result': 'result'}
                         desc_key, result_key = f"desc_{g}_{pid}", f"result_{g}_{pid}"
