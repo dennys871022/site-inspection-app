@@ -489,9 +489,28 @@ if st.session_state['saved_template']:
             st.rerun()
         # --------------------------------
         
-        # --- 這裡加入「一鍵反轉」按鈕 ---
+        # --- 反轉按鈕 (修復後：會先存檔再反轉) ---
         if st.session_state.get(f"photos_{g}"):
             if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
+                # 1. 先把螢幕上的文字抓下來存好
+                current_list = st.session_state[f"photos_{g}"]
+                for p in current_list:
+                    # Sync Description
+                    d_key = f"desc_{g}_{p['id']}"
+                    if d_key in st.session_state:
+                        p['desc'] = st.session_state[d_key]
+                    
+                    # Sync Result
+                    r_key = f"result_{g}_{p['id']}"
+                    if r_key in st.session_state:
+                        p['result'] = st.session_state[r_key]
+                        
+                    # Sync Selection
+                    s_key = f"sel_{g}_{p['id']}"
+                    if s_key in st.session_state:
+                        p['selected_opt_index'] = st.session_state[s_key]
+
+                # 2. 再反轉
                 st.session_state[f"photos_{g}"].reverse()
                 st.rerun()
         # ----------------------------
