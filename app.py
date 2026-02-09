@@ -30,6 +30,10 @@ RECIPIENTS = {
     "孫永明": "kevin891023@fengyu.com.tw",
     "林泓鈺": "henry30817@fengyu.com.tw",
     "黃元杰": "s10411097@fengyu.com.tw",
+    "郭登慶": "tw850502@fengyu.com.tw",
+    "歐冠廷": "canon1220@fengyu.com.tw",
+    "黃彥榤": "ajh73684@fengyu.com.tw",
+    "陳昱勳": "x85082399@fengyu.com.tw",
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
