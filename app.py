@@ -54,7 +54,7 @@ COMMON_SUB_CONTRACTORS = [
     "自行輸入..." 
 ]
 
-# --- 2. 終極內建資料庫 ---
+# --- 2. 終極內建資料庫 (新結構) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -309,38 +309,24 @@ def remove_element(element):
     if parent is not None:
         parent.remove(element)
 
-# --- 核心修改：徹底砍掉分頁符號之後的所有內容，且保留 sectPr ---
 def truncate_doc_after_page_break(doc):
     body = doc.element.body
     break_index = -1
-    
-    # 找分頁符號
     for i, element in enumerate(body):
         if element.tag.endswith('p'):
             if 'w:br' in element.xml and 'type="page"' in element.xml:
                 break_index = i
                 break
-    
-    # 執行刪除，但保留邊界設定 (sectPr)
     if break_index != -1:
-        # 從最後往前刪
         for i in range(len(body) - 1, break_index - 1, -1):
-            # 關鍵修正：如果遇到 'sectPr' (邊界設定)，跳過不刪！
             if body[i].tag.endswith('sectPr'):
                 continue
             remove_element(body[i])
 
-def cleanup_template_for_short_report(doc, num_photos):
-    if num_photos > 4:
-        return 
-    truncate_doc_after_page_break(doc)
-
 def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
-    
     text_replacements = {f"{{{k}}}": v for k, v in context.items()}
     replace_text_content(doc, text_replacements)
-    
     for i in range(1, 9):
         img_key = f"{{img_{i}}}"
         info_key = f"{{info_{i}}}"
@@ -348,30 +334,22 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
         if idx < len(photo_batch):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
-            
-            spacer = "\u3000" * 4
-            
+            spacer = "\u3000" * 4 
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
-            
             if data.get('design'):
                 info_text += f"設計：{data['design']}\n"
-                
             info_text += f"實測：{data['result']}"
-            
             replace_text_content(doc, {info_key: info_text})
         else:
             pass 
-
     if len(photo_batch) <= 4:
         truncate_doc_after_page_break(doc)
-    
     final_clean = {}
     for i in range(1, 9):
         final_clean[f"{{img_{i}}}"] = ""
         final_clean[f"{{info_{i}}}"] = ""
     replace_text_content(doc, final_clean)
-
     return doc
 
 def generate_names(selected_type, base_date):
@@ -404,7 +382,6 @@ def generate_clean_filename_base(selected_type, base_date):
     _, file_name = generate_names(selected_type, base_date)
     return file_name
 
-# --- Email 寄送功能 ---
 def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     try:
         sender_email = st.secrets["email"]["account"]
@@ -416,7 +393,6 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     msg['From'] = sender_email
     msg['To'] = receiver_email
     msg['Subject'] = f"[自動回報] {filename.replace('.docx', '')}"
-    
     body = f"""
     收件人：{receiver_name}
     
@@ -426,11 +402,9 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     (由 Streamlit 雲端系統自動發送)
     """
     msg.attach(MIMEText(body, 'plain'))
-    
     part = MIMEApplication(doc_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
-    
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(sender_email, sender_password)
@@ -440,45 +414,22 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
-# --- 狀態管理 ---
-def init_group_photos(g_idx):
-    if f"photos_{g_idx}" not in st.session_state:
-        st.session_state[f"photos_{g_idx}"] = []
-
-def add_new_photos(g_idx, uploaded_files):
-    init_group_photos(g_idx)
-    current_list = st.session_state[f"photos_{g_idx}"]
-    existing_ids = {p['id'] for p in current_list}
-    
-    # 不排序、不反轉，完全依照瀏覽器給的原始順序
-    for f in uploaded_files:
-        file_id = f"{f.name}_{f.size}"
-        if file_id not in existing_ids:
-            current_list.append({
-                "id": file_id, "file": f, "desc": "", "design": "", "result": "", "selected_opt_index": 0 
-            })
-            existing_ids.add(file_id)
-
-def move_photo(g_idx, index, direction):
-    lst = st.session_state[f"photos_{g_idx}"]
-    new_index = index + direction
-    if 0 <= new_index < len(lst):
-        lst[index], lst[new_index] = lst[new_index], lst[index]
-
-def delete_photo(g_idx, index):
-    lst = st.session_state[f"photos_{g_idx}"]
-    if 0 <= index < len(lst):
-        del lst[index]
-
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
 st.title("🏗️ 工程自主檢查表 (全功能整合版)")
 
-# Init
+# Init (包含自動修復舊資料邏輯)
+if 'checks_db' not in st.session_state:
+    st.session_state['checks_db'] = CHECKS_DB
+else:
+    # 檢查是否為舊格式 (dict), 如果是就強制更新
+    first_val = list(st.session_state['checks_db'].values())[0]
+    if isinstance(first_val, dict):
+        st.session_state['checks_db'] = CHECKS_DB # 強制更新為 list 格式
+
 if 'merged_doc_buffer' not in st.session_state: st.session_state['merged_doc_buffer'] = None
 if 'merged_filename' not in st.session_state: st.session_state['merged_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
-if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
 
 DEFAULT_TEMPLATE_PATH = "template.docx"
@@ -503,17 +454,11 @@ def update_group_info(g_idx):
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, _ = generate_names(selected_type, base_date)
     st.session_state[f"item_{g_idx}"] = item_name
-
-    # 清除舊資料
     keys_to_clear = [k for k in st.session_state.keys() if f"_{g_idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
     for k in keys_to_clear: del st.session_state[k]
-    
     if f"photos_{g_idx}" in st.session_state:
         for p in st.session_state[f"photos_{g_idx}"]:
-            p['desc'] = ""
-            p['design'] = ""
-            p['result'] = ""
-            p['selected_opt_index'] = 0
+            p['desc'] = ""; p['design'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
@@ -538,8 +483,6 @@ with st.sidebar:
         uploaded_db = st.file_uploader("上傳 Excel", type=['xlsx', 'csv'])
         if uploaded_db:
             try:
-                # 這裡需要配合新結構做調整，暫時維持基本讀取
-                # 若需使用擴充功能，Excel 格式需改為 desc, design, result 三欄
                 st.info("請上傳包含 desc, design, result 三欄的 Excel")
             except: st.error("讀取失敗")
     
@@ -550,109 +493,76 @@ with st.sidebar:
     st.header("2. 專案資訊")
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
-    
     sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS)
     if sub_select == "自行輸入...":
         p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
     else:
         p_sub = sub_select
-    
     p_loc = st.text_input("施作位置", "北棟 1F")
     base_date = st.date_input("日期", get_taiwan_date(), key='global_date')
 
 # Main
 if st.session_state['saved_template']:
-    
     num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=st.session_state['num_groups'], key='num_groups_input')
     st.session_state['num_groups'] = num_groups
-    
     all_groups_data = []
 
     for g in range(num_groups):
         st.markdown(f"---")
         st.subheader(f"📂 第 {g+1} 組")
-        
         c1, c2, c3 = st.columns([2, 2, 1])
         db_options = list(st.session_state['checks_db'].keys())
-        
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
-        
         g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
-        
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
 
         st.markdown("##### 📸 照片上傳與排序")
-        
         uploader_key_name = f"uploader_key_{g}"
-        if uploader_key_name not in st.session_state:
-            st.session_state[uploader_key_name] = 0
-            
+        if uploader_key_name not in st.session_state: st.session_state[uploader_key_name] = 0
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
-        
-        new_files = st.file_uploader(
-            f"點擊此處選擇照片 (第 {g+1} 組)", 
-            type=['jpg','png','jpeg'], 
-            accept_multiple_files=True, 
-            key=dynamic_key
-        )
-        
+        new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=dynamic_key)
         if new_files:
             add_new_photos(g, new_files)
             st.session_state[uploader_key_name] += 1
             st.rerun()
         
-        # --- 反轉按鈕 ---
         if st.session_state.get(f"photos_{g}"):
             if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
                 current_list = st.session_state[f"photos_{g}"]
                 for p in current_list:
-                    # Sync Description
                     d_key = f"desc_{g}_{p['id']}"
                     if d_key in st.session_state: p['desc'] = st.session_state[d_key]
-                    # Sync Design
                     des_key = f"design_{g}_{p['id']}"
                     if des_key in st.session_state: p['design'] = st.session_state[des_key]
-                    # Sync Result
                     r_key = f"result_{g}_{p['id']}"
                     if r_key in st.session_state: p['result'] = st.session_state[r_key]
-                    # Sync Selection
                     s_key = f"sel_{g}_{p['id']}"
                     if s_key in st.session_state: p['selected_opt_index'] = st.session_state[s_key]
-
                 st.session_state[f"photos_{g}"].reverse()
                 st.rerun()
-        # ----------------------------
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
         
         if photo_list:
-            # 取得該工項的所有檢查項目列表 (dict list)
             check_items_list = st.session_state['checks_db'][selected_type]
-            
-            # 選單顯示：僅顯示 desc (說明)
             options = ["(請選擇...)"] + [item['desc'] for item in check_items_list]
 
             for i, photo_data in enumerate(photo_list):
                 with st.container():
                     col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
                     pid = photo_data['id']
-                    
                     with col_img:
                         st.image(photo_data['file'], use_container_width=True)
                         st.caption(f"No. {i+1:02d}")
-                    
                     with col_info:
-                        # --- 下拉選單變更邏輯 ---
                         def on_select_change(pk=pid, gk=g):
                             k = f"sel_{gk}_{pk}"
                             if k not in st.session_state: return
                             new_idx = st.session_state[k]
-                            
                             dk, desk, rk = f"desc_{gk}_{pk}", f"design_{gk}_{pk}", f"result_{gk}_{pk}"
-                            
                             if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(check_items_list):
                                 item_data = check_items_list[new_idx-1]
                                 st.session_state[dk] = item_data['desc']
@@ -665,30 +575,22 @@ if st.session_state['saved_template']:
 
                         current_opt_idx = photo_data.get('selected_opt_index', 0)
                         if current_opt_idx > len(options): current_opt_idx = 0
-
                         st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
 
-                        # --- 文字輸入框同步邏輯 ---
                         def on_text_change(field, pk=pid, idx=i, gk=g): 
                             val = st.session_state[f"{field}_{gk}_{pk}"]
                             st.session_state[f"photos_{gk}"][idx][field] = val
                             if field == 'sel': st.session_state[f"photos_{gk}"][idx]['selected_opt_index'] = val
 
-                        # 初始化欄位 (如果 session 中沒有，就從 photo_data 拿)
                         desc_key = f"desc_{g}_{pid}"
                         design_key = f"design_{g}_{pid}"
                         result_key = f"result_{g}_{pid}"
-                        
                         if desc_key not in st.session_state: st.session_state[desc_key] = photo_data.get('desc', '')
                         if design_key not in st.session_state: st.session_state[design_key] = photo_data.get('design', '')
                         if result_key not in st.session_state: st.session_state[result_key] = photo_data.get('result', '')
 
-                        # --- 顯示三個欄位 ---
                         st.text_input("說明", key=desc_key, on_change=on_text_change, args=('desc',))
-                        
-                        # 設計欄位：可以手動修改，也可以為空
                         st.text_input("設計 (可留空)", key=design_key, on_change=on_text_change, args=('design',))
-                        
                         st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
 
                     with col_ctrl:
@@ -702,14 +604,9 @@ if st.session_state['saved_template']:
                 d_val = st.session_state.get(f"desc_{g}_{p['id']}", p['desc'])
                 des_val = st.session_state.get(f"design_{g}_{p['id']}", p['design'])
                 r_val = st.session_state.get(f"result_{g}_{p['id']}", p['result'])
-                
                 g_photos_export.append({
-                    "file": p['file'], 
-                    "no": i + 1, 
-                    "date_str": date_display, 
-                    "desc": d_val, 
-                    "design": des_val, # 新增設計欄位
-                    "result": r_val
+                    "file": p['file'], "no": i + 1, "date_str": date_display, 
+                    "desc": d_val, "design": des_val, "result": r_val
                 })
 
             all_groups_data.append({
@@ -721,10 +618,8 @@ if st.session_state['saved_template']:
                 "photos": g_photos_export
             })
 
-    # --- 最終操作區 ---
     st.markdown("---")
     st.subheader("🚀 執行操作")
-    
     default_filename = ""
     if "type_0" in st.session_state:
         default_filename = generate_clean_filename_base(st.session_state["type_0"], base_date)
@@ -732,71 +627,45 @@ if st.session_state['saved_template']:
         default_filename = f"自主檢查表_{get_taiwan_date()}"
 
     final_file_name_input = st.text_input("📝 最終 Word 檔名", value=default_filename)
-    if not final_file_name_input.endswith(".docx"):
-        final_file_name = final_file_name_input + ".docx"
-    else:
-        final_file_name = final_file_name_input
+    if not final_file_name_input.endswith(".docx"): final_file_name = final_file_name_input + ".docx"
+    else: final_file_name = final_file_name_input
 
     selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
     target_email = RECIPIENTS[selected_name]
 
     if st.button("步驟 1：生成報告資料 (單一 Word 檔)", type="primary", use_container_width=True):
-        if not all_groups_data:
-            st.error("⚠️ 請至少上傳一張照片並填寫資料")
+        if not all_groups_data: st.error("⚠️ 請至少上傳一張照片並填寫資料")
         else:
             with st.spinner("📦 正在生成並合併 Word 檔案..."):
                 master_doc = None
                 composer = None
-                
                 for group in all_groups_data:
                     photos = group['photos']
                     context = group['context']
-                    
                     for page_idx, i in enumerate(range(0, len(photos), 8)):
                         batch = photos[i : i+8]
                         start_no = i + 1
-                        
                         current_doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
-                        
                         if master_doc is None:
                             master_doc = current_doc
                             composer = Composer(master_doc)
                         else:
                             composer.append(current_doc)
-                
                 out_buffer = io.BytesIO()
                 composer.save(out_buffer)
-                
                 st.session_state['merged_doc_buffer'] = out_buffer.getvalue()
                 st.session_state['merged_filename'] = final_file_name
-                
                 st.success(f"✅ 彙整完成！檔名：{final_file_name}")
 
     if st.session_state['merged_doc_buffer']:
         col_mail, col_dl = st.columns(2)
-        
         with col_mail:
             if st.button(f"📧 立即寄出 Word 檔給：{selected_name}", use_container_width=True):
                 with st.spinner("📨 雲端發信中..."):
-                    success, msg = send_email_via_secrets(
-                        st.session_state['merged_doc_buffer'], 
-                        st.session_state['merged_filename'],
-                        target_email,
-                        selected_name
-                    )
-                    if success:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-        
+                    success, msg = send_email_via_secrets(st.session_state['merged_doc_buffer'], st.session_state['merged_filename'], target_email, selected_name)
+                    if success: st.success(msg)
+                    else: st.error(msg)
         with col_dl:
-            st.download_button(
-                label="📥 下載 Word 檔案", 
-                data=st.session_state['merged_doc_buffer'], 
-                file_name=st.session_state['merged_filename'], 
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                use_container_width=True
-            )
-
+            st.download_button(label="📥 下載 Word 檔案", data=st.session_state['merged_doc_buffer'], file_name=st.session_state['merged_filename'], mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
 else:
     st.info("👈 請先在左側確認 Word 樣板")
