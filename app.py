@@ -233,10 +233,53 @@ def replace_placeholder_with_image(doc, placeholder, image_stream):
                             run.add_picture(image_stream, width=Cm(8.0))
                         return
 
+# --- 新增功能：移除 XML 元素 (用於刪除空表格列或段落) ---
+def remove_element(element):
+    parent = element.getparent()
+    if parent is not None:
+        parent.remove(element)
+
+# --- 新增功能：如果照片少於5張，清理 Word 模板中第5-8張的空位與分頁 ---
+def cleanup_template_for_short_report(doc, num_photos):
+    if num_photos > 4:
+        return # 如果照片超過4張，保留完整模板
+    
+    # 定義要移除的佔位符關鍵字
+    placeholders_to_remove = [f"{{img_{i}}}" for i in range(5, 9)] + \
+                             [f"{{info_{i}}}" for i in range(5, 9)]
+    
+    # 1. 掃描所有表格，如果某一列包含這些佔位符，刪除該列
+    for table in list(doc.tables): 
+        for row in list(table.rows):
+            row_text = ""
+            for cell in row.cells:
+                row_text += cell.text
+            
+            if any(ph in row_text for ph in placeholders_to_remove):
+                remove_element(row._element)
+                
+    # 2. 掃描所有段落，如果包含這些佔位符，刪除該段落
+    for paragraph in list(doc.paragraphs):
+        if any(ph in paragraph.text for ph in placeholders_to_remove):
+            remove_element(paragraph._element)
+            
+    # 3. 移除分頁符號 (Page Breaks)
+    # 通常分頁符號會在第4張照片後的某個段落
+    for p in doc.paragraphs:
+        if p.runs:
+            for r in p.runs:
+                # 檢查 XML 是否包含分頁符號
+                if 'w:br' in r._element.xml and 'type="page"' in r._element.xml:
+                    remove_element(r._element)
+
 def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
+    
+    # --- 1. 先執行文字替換 ---
     text_replacements = {f"{{{k}}}": v for k, v in context.items()}
     replace_text_content(doc, text_replacements)
+    
+    # --- 2. 填入照片與說明 (只填入有的部分) ---
     for i in range(1, 9):
         img_key = f"{{img_{i}}}"
         info_key = f"{{info_{i}}}"
@@ -250,8 +293,19 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             info_text += f"實測：{data['result']}"
             replace_text_content(doc, {info_key: info_text})
         else:
-            replace_text_content(doc, {img_key: ""})
-            replace_text_content(doc, {info_key: ""})
+            # 這裡不急著清空，交給下面的 cleanup 函式處理
+            pass 
+
+    # --- 3. 智慧縮減：如果照片 <= 4，刪除多餘的空位與分頁 ---
+    cleanup_template_for_short_report(doc, len(photo_batch))
+    
+    # --- 4. 最後清理剩餘的佔位符 (以免漏網之魚印出來) ---
+    final_clean = {}
+    for i in range(1, 9):
+        final_clean[f"{{img_{i}}}"] = ""
+        final_clean[f"{{info_{i}}}"] = ""
+    replace_text_content(doc, final_clean)
+
     return doc
 
 def generate_names(selected_type, base_date):
