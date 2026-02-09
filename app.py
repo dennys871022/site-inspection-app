@@ -20,7 +20,7 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 設定收件人名單 (已更新) ---
+# --- 1. 設定收件人名單 ---
 RECIPIENTS = {
     "范嘉文": "ses543212004@fengyu.com.tw",
     "林憲睿": "dennys871022@fengyu.com.tw",
@@ -37,7 +37,7 @@ RECIPIENTS = {
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
-# --- 常用協力廠商名單 (已更新) ---
+# --- 常用協力廠商名單 ---
 COMMON_SUB_CONTRACTORS = [
     "川峻工程有限公司",
     "世銓營造股份有限公司",
@@ -325,6 +325,11 @@ def add_new_photos(g_idx, uploaded_files):
     init_group_photos(g_idx)
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
+    
+    # --- FIX: 移除自動排序，保留原始上傳順序 ---
+    # uploaded_files.sort(key=lambda x: x.name) <--- 刪除這行
+    # ----------------------------------------
+
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
@@ -465,15 +470,16 @@ if st.session_state['saved_template']:
         c3.text(f"日期: {date_display}")
         file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
-        st.markdown("##### 📸 照片上傳與排序")
+        st.markdown("##### 📸 照片上傳與排序 (支援一次多選)")
         
-        # --- 手機上傳優化邏輯 (動態 Key) ---
+        # --- 多選上傳模式 (動態 Key) ---
         uploader_key_name = f"uploader_key_{g}"
         if uploader_key_name not in st.session_state:
             st.session_state[uploader_key_name] = 0
             
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
         
+        # 恢復 accept_multiple_files=True
         new_files = st.file_uploader(
             f"點擊此處選擇照片 (第 {g+1} 組)", 
             type=['jpg','png','jpeg'], 
@@ -522,7 +528,6 @@ if st.session_state['saved_template']:
 
                         st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
 
-                        # --- 修復重點：加入 gk=g 來綁定當下的組別變數，解決 KeyError ---
                         def on_text_change(field, pk=pid, idx=i, gk=g): 
                             val = st.session_state[f"{field}_{gk}_{pk}"]
                             st.session_state[f"photos_{gk}"][idx][field_map[field]] = val
