@@ -22,8 +22,9 @@ def get_taiwan_date():
 # --- 1. 設定收件人名單 (請在此修改) ---
 # 💡 這裡設定後，網頁上就會出現下拉選單
 RECIPIENTS = {
-    "總公司工務部": "office_main@example.com",
-    "專案經理": "manager@example.com",
+    "林憲睿": "dennys871022@fengyu.com.tw",
+    "翁育玟": "Vicky1019@fengyu.com.tw",
+    "林智捷": "ccl20010218@fengyu.com.tw",
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
