@@ -1,8 +1,9 @@
 import streamlit as st
+import setuptools  # <--- 新增這一行在最上面！
 from docx import Document
 from docx.shared import Cm, Pt
 from docx.oxml.ns import qn
-from docxcompose.composer import Composer # <--- 這是合併檔案的關鍵
+from docxcompose.composer import Composer
 from PIL import Image
 import io
 import datetime
