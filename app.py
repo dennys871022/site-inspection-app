@@ -2,6 +2,7 @@ import streamlit as st
 from docx import Document
 from docx.shared import Cm, Pt
 from docx.oxml.ns import qn
+from docxcompose.composer import Composer # <--- 這是合併檔案的關鍵
 from PIL import Image
 import io
 import datetime
@@ -233,53 +234,44 @@ def replace_placeholder_with_image(doc, placeholder, image_stream):
                             run.add_picture(image_stream, width=Cm(8.0))
                         return
 
-# --- 新增功能：移除 XML 元素 (用於刪除空表格列或段落) ---
 def remove_element(element):
     parent = element.getparent()
     if parent is not None:
         parent.remove(element)
 
-# --- 新增功能：如果照片少於5張，清理 Word 模板中第5-8張的空位與分頁 ---
 def cleanup_template_for_short_report(doc, num_photos):
     if num_photos > 4:
-        return # 如果照片超過4張，保留完整模板
+        return 
     
-    # 定義要移除的佔位符關鍵字
     placeholders_to_remove = [f"{{img_{i}}}" for i in range(5, 9)] + \
                              [f"{{info_{i}}}" for i in range(5, 9)]
     
-    # 1. 掃描所有表格，如果某一列包含這些佔位符，刪除該列
     for table in list(doc.tables): 
         for row in list(table.rows):
             row_text = ""
             for cell in row.cells:
                 row_text += cell.text
-            
             if any(ph in row_text for ph in placeholders_to_remove):
                 remove_element(row._element)
                 
-    # 2. 掃描所有段落，如果包含這些佔位符，刪除該段落
     for paragraph in list(doc.paragraphs):
         if any(ph in paragraph.text for ph in placeholders_to_remove):
             remove_element(paragraph._element)
             
-    # 3. 移除分頁符號 (Page Breaks)
-    # 通常分頁符號會在第4張照片後的某個段落
     for p in doc.paragraphs:
         if p.runs:
             for r in p.runs:
-                # 檢查 XML 是否包含分頁符號
                 if 'w:br' in r._element.xml and 'type="page"' in r._element.xml:
                     remove_element(r._element)
 
 def generate_single_page(template_bytes, context, photo_batch, start_no):
     doc = Document(io.BytesIO(template_bytes))
     
-    # --- 1. 先執行文字替換 ---
+    # 1. 文字替換
     text_replacements = {f"{{{k}}}": v for k, v in context.items()}
     replace_text_content(doc, text_replacements)
     
-    # --- 2. 填入照片與說明 (只填入有的部分) ---
+    # 2. 填入照片
     for i in range(1, 9):
         img_key = f"{{img_{i}}}"
         info_key = f"{{info_{i}}}"
@@ -293,13 +285,12 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             info_text += f"實測：{data['result']}"
             replace_text_content(doc, {info_key: info_text})
         else:
-            # 這裡不急著清空，交給下面的 cleanup 函式處理
             pass 
 
-    # --- 3. 智慧縮減：如果照片 <= 4，刪除多餘的空位與分頁 ---
+    # 3. 智慧縮減 (刪除多餘頁面)
     cleanup_template_for_short_report(doc, len(photo_batch))
     
-    # --- 4. 最後清理剩餘的佔位符 (以免漏網之魚印出來) ---
+    # 4. 清理剩餘佔位符
     final_clean = {}
     for i in range(1, 9):
         final_clean[f"{{img_{i}}}"] = ""
@@ -334,8 +325,8 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 ---
-def send_email_via_secrets(zip_bytes, filename, receiver_email, receiver_name):
+# --- Email 寄送功能 (更新為傳送單一 .docx) ---
+def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     try:
         sender_email = st.secrets["email"]["account"]
         sender_password = st.secrets["email"]["password"]
@@ -345,19 +336,20 @@ def send_email_via_secrets(zip_bytes, filename, receiver_email, receiver_name):
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
-    msg['Subject'] = f"[自動回報] {filename}"
+    msg['Subject'] = f"[自動回報] {filename.replace('.docx', '')}" # 標題去掉副檔名
     
     body = f"""
     收件人：{receiver_name}
     
-    這是由系統自動生成的檢查表：{filename}
-    請查收附件。
+    這是由系統自動生成的檢查表彙整：{filename}
+    內含所有檢查項目。
     
     (由 Streamlit 雲端系統自動發送)
     """
     msg.attach(MIMEText(body, 'plain'))
     
-    part = MIMEApplication(zip_bytes, Name=filename)
+    # 附件類型改為 Word
+    part = MIMEApplication(doc_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
     
@@ -380,7 +372,6 @@ def add_new_photos(g_idx, uploaded_files):
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
     
-    # --- FIX: 不排序、不反轉，完全依照瀏覽器給的原始順序 ---
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
@@ -402,11 +393,11 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (手機優化版)")
+st.title("🏗️ 工程自主檢查表 (全功能整合版)")
 
 # Init
-if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
-if 'zip_filename' not in st.session_state: st.session_state['zip_filename'] = ""
+if 'merged_doc_buffer' not in st.session_state: st.session_state['merged_doc_buffer'] = None
+if 'merged_filename' not in st.session_state: st.session_state['merged_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
 if 'checks_db' not in st.session_state: st.session_state['checks_db'] = CHECKS_DB
 if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
@@ -446,8 +437,8 @@ def clear_all_data():
         if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'result_')):
             del st.session_state[key]
     st.session_state['num_groups'] = 1
-    st.session_state['zip_buffer'] = None
-    st.session_state['zip_filename'] = ""
+    st.session_state['merged_doc_buffer'] = None
+    st.session_state['merged_filename'] = ""
 
 # Sidebar
 with st.sidebar:
@@ -543,10 +534,9 @@ if st.session_state['saved_template']:
             st.rerun()
         # --------------------------------
         
-        # --- 反轉按鈕 (修復後：會先存檔再反轉) ---
+        # --- 反轉按鈕 ---
         if st.session_state.get(f"photos_{g}"):
             if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
-                # 1. 先把螢幕上的文字抓下來存好
                 current_list = st.session_state[f"photos_{g}"]
                 for p in current_list:
                     # Sync Description
@@ -564,7 +554,6 @@ if st.session_state['saved_template']:
                     if s_key in st.session_state:
                         p['selected_opt_index'] = st.session_state[s_key]
 
-                # 2. 再反轉
                 st.session_state[f"photos_{g}"].reverse()
                 st.rerun()
         # ----------------------------
@@ -647,40 +636,60 @@ if st.session_state['saved_template']:
     selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
     target_email = RECIPIENTS[selected_name]
 
-    if st.button("步驟 1：生成報告資料", type="primary", use_container_width=True):
+    if st.button("步驟 1：生成報告資料 (單一 Word 檔)", type="primary", use_container_width=True):
         if not all_groups_data:
             st.error("⚠️ 請至少上傳一張照片並填寫資料")
         else:
-            with st.spinner("📦 正在打包 ZIP..."):
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w") as zf:
-                    for group in all_groups_data:
-                        photos = group['photos']
-                        context = group['context']
-                        file_prefix = group['file_prefix']
-                        for page_idx, i in enumerate(range(0, len(photos), 8)):
-                            batch = photos[i : i+8]
-                            start_no = i + 1
-                            doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
-                            doc_io = io.BytesIO()
-                            doc.save(doc_io)
-                            suffix = f"({page_idx+1})" if len(photos) > 8 else ""
-                            fname = f"{file_prefix}{suffix}.docx"
-                            zf.writestr(fname, doc_io.getvalue())
+            with st.spinner("📦 正在生成並合併 Word 檔案..."):
+                # --- 重大修改：使用 Composer 合併檔案 ---
+                master_doc = None
+                composer = None
                 
-                st.session_state['zip_buffer'] = zip_buffer.getvalue()
-                st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
-                st.success("✅ 資料生成完畢！請選擇下一步：")
+                for group in all_groups_data:
+                    photos = group['photos']
+                    context = group['context']
+                    # 每一組可能因為照片多寡產生 1 或 2 頁 (或更多)
+                    # 我們這裡假設每組只會用到一次 generate_single_page (處理 8 張)
+                    # 如果單組超過 8 張，您原本的邏輯是切分 batch，這裡沿用
+                    
+                    for page_idx, i in enumerate(range(0, len(photos), 8)):
+                        batch = photos[i : i+8]
+                        start_no = i + 1
+                        
+                        # 生成這一頁的 Doc (已包含智慧縮減)
+                        current_doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
+                        
+                        if master_doc is None:
+                            # 第一個生成的文檔當作主文檔
+                            master_doc = current_doc
+                            composer = Composer(master_doc)
+                        else:
+                            # 之後的文檔都附加到主文檔後面
+                            # 注意：docxcompose 會自動處理分頁符號
+                            composer.append(current_doc)
+                
+                # 儲存合併後的檔案
+                out_buffer = io.BytesIO()
+                composer.save(out_buffer)
+                
+                st.session_state['merged_doc_buffer'] = out_buffer.getvalue()
+                
+                # 設定合併後的檔名
+                roc_year = base_date.year - 1911
+                date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
+                st.session_state['merged_filename'] = f"自主檢查表彙整_{date_str}.docx"
+                
+                st.success("✅ 彙整完成！所有組別已合併為單一 Word 檔。")
 
-    if st.session_state['zip_buffer']:
+    if st.session_state['merged_doc_buffer']:
         col_mail, col_dl = st.columns(2)
         
         with col_mail:
-            if st.button(f"📧 立即寄出給：{selected_name}", use_container_width=True):
+            if st.button(f"📧 立即寄出 Word 檔給：{selected_name}", use_container_width=True):
                 with st.spinner("📨 雲端發信中..."):
                     success, msg = send_email_via_secrets(
-                        st.session_state['zip_buffer'], 
-                        st.session_state['zip_filename'],
+                        st.session_state['merged_doc_buffer'], 
+                        st.session_state['merged_filename'],
                         target_email,
                         selected_name
                     )
@@ -691,10 +700,10 @@ if st.session_state['saved_template']:
         
         with col_dl:
             st.download_button(
-                label="📥 下載 ZIP 檔案", 
-                data=st.session_state['zip_buffer'], 
-                file_name=st.session_state['zip_filename'], 
-                mime="application/zip", 
+                label="📥 下載 Word 檔案", 
+                data=st.session_state['merged_doc_buffer'], 
+                file_name=st.session_state['merged_filename'], 
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
                 use_container_width=True
             )
 
