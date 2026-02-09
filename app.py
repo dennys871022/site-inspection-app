@@ -19,7 +19,15 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 終極內建資料庫 (維持不變) ---
+# --- 1. 設定收件人名單 (請在此修改) ---
+# 💡 這裡設定後，網頁上就會出現下拉選單
+RECIPIENTS = {
+    "總公司工務部": "office_main@example.com",
+    "專案經理": "manager@example.com",
+    "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
+}
+
+# --- 2. 終極內建資料庫 (維持不變) ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -115,7 +123,7 @@ CHECKS_DB = {
     }
 }
 
-# --- 2. 核心功能 ---
+# --- 3. 核心功能 ---
 
 def get_paragraph_style(paragraph):
     style = {}
@@ -243,55 +251,44 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 (自動讀取 Secrets 版) ---
-def send_email_with_zip(zip_bytes, filename, receiver_email, service_provider):
+# --- Email 寄送功能 (使用 Secrets) ---
+def send_email_via_secrets(zip_bytes, filename, receiver_email, receiver_name):
     """
-    依據使用者選擇的服務商設定 SMTP，並自動從 st.secrets 抓取帳密
+    透過 st.secrets 讀取帳密並寄信
     """
+    # 讀取 Secrets
     try:
-        # ✅ 從系統後台讀取帳號與密碼 (資安保護)
         sender_email = st.secrets["email"]["account"]
         sender_password = st.secrets["email"]["password"]
-    except Exception:
-        return False, "❌ 無法讀取帳密！請確認是否已在 Streamlit Secrets 後台設定 [email] 區塊。"
+    except KeyError:
+        return False, "❌ 找不到 Secrets 設定！請檢查 secrets.toml 或雲端後台設定。"
 
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
-    msg['Subject'] = f"[自動寄送] {filename}"
+    msg['Subject'] = f"[自動回報] {filename}"
     
-    body = f"這是由系統自動生成的檢查表：{filename}\n請查收附件。"
+    body = f"""
+    收件人：{receiver_name}
+    
+    這是由系統自動生成的檢查表：{filename}
+    請查收附件。
+    
+    (由 Streamlit 雲端系統自動發送)
+    """
     msg.attach(MIMEText(body, 'plain'))
     
     part = MIMEApplication(zip_bytes, Name=filename)
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
     
-    # SMTP 設定
-    if service_provider == "Gmail":
-        smtp_server = 'smtp.gmail.com'
-        smtp_port = 587
-    elif service_provider == "Outlook / Office 365":
-        smtp_server = 'smtp.office365.com'
-        smtp_port = 587
-    else: 
-        return False, "設定錯誤"
-
     try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
+        # 預設使用 Gmail SMTP 設定
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(sender_email, sender_password)
-        text = msg.as_string()
-        server.sendmail(sender_email, receiver_email, text)
+        server.send_message(msg)
         server.quit()
-        return True, "✅ 寄送成功！請檢查收件信箱。"
-    except smtplib.SMTPAuthenticationError:
-        error_msg = "❌ 認證失敗！"
-        if service_provider == "Gmail":
-            error_msg += "\n請確認密碼是否使用了 16 碼的「應用程式密碼」。"
-        elif service_provider == "Outlook / Office 365":
-            error_msg += "\n請確認 Outlook 密碼是否正確，或是否被雙重驗證阻擋。"
-        return False, error_msg
+        return True, f"✅ 寄送成功！已寄給 {receiver_name} ({receiver_email})"
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
@@ -325,7 +322,7 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (自動寄信支援版)")
+st.title("🏗️ 工程自主檢查表 (自動化整合版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -370,6 +367,7 @@ def clear_all_data():
             del st.session_state[key]
     st.session_state['num_groups'] = 1
     st.session_state['zip_buffer'] = None
+    st.session_state['zip_filename'] = ""
 
 # Sidebar
 with st.sidebar:
@@ -480,7 +478,7 @@ if st.session_state['saved_template']:
                             if field == 'sel': st.session_state[f"photos_{g}"][idx]['selected_opt_index'] = val
 
                         field_map = {'desc': 'desc', 'result': 'result'}
-                        desc_key, result_key = f"desc_{g}_{pid}"
+                        desc_key, result_key = f"desc_{g}_{pid}", f"result_{g}_{pid}"
                         if desc_key not in st.session_state: st.session_state[desc_key] = photo_data['desc']
                         if result_key not in st.session_state: st.session_state[result_key] = photo_data['result']
 
@@ -510,59 +508,66 @@ if st.session_state['saved_template']:
                 "photos": g_photos_export
             })
 
+    # --- 最終操作區 ---
     st.markdown("---")
-    if st.button("🚀 1. 產生報告 ZIP", type="primary", use_container_width=True):
-        if not all_groups_data:
-            st.error("請上傳照片")
-        else:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                for group in all_groups_data:
-                    photos = group['photos']
-                    context = group['context']
-                    file_prefix = group['file_prefix']
-                    for page_idx, i in enumerate(range(0, len(photos), 8)):
-                        batch = photos[i : i+8]
-                        start_no = i + 1
-                        doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
-                        doc_io = io.BytesIO()
-                        doc.save(doc_io)
-                        suffix = f"({page_idx+1})" if len(photos) > 8 else ""
-                        fname = f"{file_prefix}{suffix}.docx"
-                        zf.writestr(fname, doc_io.getvalue())
-            st.session_state['zip_buffer'] = zip_buffer.getvalue()
-            st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
-            st.success("✅ 報告已生成！")
+    st.subheader("🚀 執行操作")
+    
+    # 選擇收件人 (位於按鈕上方)
+    selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
+    target_email = RECIPIENTS[selected_name]
 
+    # 按鈕
+    if st.button("步驟 1：生成報告資料", type="primary", use_container_width=True):
+        if not all_groups_data:
+            st.error("⚠️ 請至少上傳一張照片並填寫資料")
+        else:
+            with st.spinner("📦 正在打包 ZIP..."):
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zf:
+                    for group in all_groups_data:
+                        photos = group['photos']
+                        context = group['context']
+                        file_prefix = group['file_prefix']
+                        for page_idx, i in enumerate(range(0, len(photos), 8)):
+                            batch = photos[i : i+8]
+                            start_no = i + 1
+                            doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
+                            doc_io = io.BytesIO()
+                            doc.save(doc_io)
+                            suffix = f"({page_idx+1})" if len(photos) > 8 else ""
+                            fname = f"{file_prefix}{suffix}.docx"
+                            zf.writestr(fname, doc_io.getvalue())
+                
+                st.session_state['zip_buffer'] = zip_buffer.getvalue()
+                st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
+                st.success("✅ 資料生成完畢！請選擇下一步：")
+
+    # 如果已經生成過，顯示下一步按鈕 (並排)
     if st.session_state['zip_buffer']:
-        col_dl, col_mail = st.columns(2)
-        with col_dl:
-            st.download_button(label="📥 下載 ZIP 檔案", data=st.session_state['zip_buffer'], file_name=st.session_state['zip_filename'], mime="application/zip", use_container_width=True)
-            
+        col_mail, col_dl = st.columns(2)
+        
         with col_mail:
-            with st.expander("🤖 自動寄送 Email (免下載)", expanded=True):
-                st.info("💡 系統將自動讀取後台設定的帳戶進行寄信，無須輸入密碼。")
-                
-                # 保留選擇寄信伺服器，但不再要求填寫寄件人帳密
-                provider = st.selectbox("選擇您的寄件伺服器", ["Gmail", "Outlook / Office 365"], index=0)
-                
-                # 收件人可自行填寫或設計下拉選單
-                receiver = st.text_input("收件者 Email", value="office@company.com")
-                
-                if st.button("📤 立即發送", type="primary"):
-                    if not receiver:
-                        st.error("請填寫收件者 Email")
+            if st.button(f"📧 立即寄出給：{selected_name}", use_container_width=True):
+                with st.spinner("📨 雲端發信中..."):
+                    success, msg = send_email_via_secrets(
+                        st.session_state['zip_buffer'], 
+                        st.session_state['zip_filename'],
+                        target_email,
+                        selected_name
+                    )
+                    if success:
+                        st.success(msg)
                     else:
-                        with st.spinner("📨 傳送至辦公室中..."):
-                            success, msg = send_email_with_zip(
-                                st.session_state['zip_buffer'], 
-                                st.session_state['zip_filename'], 
-                                receiver, 
-                                provider
-                            )
-                            if success: 
-                                st.success(msg)
-                            else: 
-                                st.error(msg)
+                        st.error(msg)
+        
+        with col_dl:
+            st.download_button(
+                label="📥 下載 ZIP 檔案", 
+                data=st.session_state['zip_buffer'], 
+                file_name=st.session_state['zip_filename'], 
+                mime="application/zip", 
+                use_container_width=True
+            )
+
 else:
     st.info("👈 請先在左側確認 Word 樣板")
