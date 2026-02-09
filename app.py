@@ -10,6 +10,7 @@ import os
 import zipfile
 import pandas as pd
 import smtplib
+import re  # <--- 新增這個，用來處理括號移動
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -26,15 +27,15 @@ RECIPIENTS = {
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
-# --- 常用協力廠商名單 (可在此新增) ---
+# --- 常用協力廠商名單 ---
 COMMON_SUB_CONTRACTORS = [
     "川峻工程有限公司",
     "豐譽營造股份有限公司",
     "大漢工程",
-    "自行輸入..." # 必須保留這個選項
+    "自行輸入..." 
 ]
 
-# --- 2. 終極內建資料庫 (維持不變) ---
+# --- 2. 終極內建資料庫 ---
 CHECKS_DB = {
     "拆除工程-施工 (EA26)": {
         "items": [
@@ -241,7 +242,10 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
     return doc
 
 def generate_names(selected_type, base_date):
+    # 1. 先去除 (EA26) 等代號
     clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
+    
+    # 2. 判斷基本後綴
     suffix = "自主檢查"
     if "施工" in clean_type or "混凝土" in clean_type:
         suffix = "施工自主檢查"
@@ -252,7 +256,17 @@ def generate_names(selected_type, base_date):
     elif "有價廢料" in clean_type:
         suffix = "有價廢料清運自主檢查"
         clean_type = clean_type.replace("-有價廢料", "")
-    full_item_name = f"{clean_type}{suffix}"
+    
+    # 3. 處理括號位置：將 (xxx) 移到最後面
+    # 例如：擋土排樁工程(預壘樁) -> 擋土排樁工程 + Suffix + (預壘樁)
+    match = re.search(r'(\(.*\))', clean_type)
+    extra_info = ""
+    if match:
+        extra_info = match.group(1) # 抓取括號內容
+        clean_type = clean_type.replace(extra_info, "").strip() # 從主名稱移除，並去除多餘空白
+        
+    full_item_name = f"{clean_type}{suffix}{extra_info}"
+    
     roc_year = base_date.year - 1911
     roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
     file_name = f"{roc_date_str}{full_item_name}"
@@ -408,7 +422,7 @@ with st.sidebar:
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
     
-    # --- 修改點 1: 協力廠商 下拉選單 + 輸入 ---
+    # --- 協力廠商 下拉選單 + 輸入 ---
     sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS)
     if sub_select == "自行輸入...":
         p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
@@ -445,13 +459,11 @@ if st.session_state['saved_template']:
 
         st.markdown("##### 📸 照片上傳與排序")
         
-        # --- 修改點 2: 手機上傳優化邏輯 ---
-        # 為了讓上傳器能「自動清空」，我們使用動態 key
+        # --- 手機上傳優化邏輯 (動態 Key) ---
         uploader_key_name = f"uploader_key_{g}"
         if uploader_key_name not in st.session_state:
             st.session_state[uploader_key_name] = 0
             
-        # 使用動態 key，每次上傳成功後 key+1，強制 Streamlit 產生一個全新的上傳框
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
         
         new_files = st.file_uploader(
@@ -462,11 +474,8 @@ if st.session_state['saved_template']:
         )
         
         if new_files:
-            # 1. 處理照片
             add_new_photos(g, new_files)
-            # 2. 改變 key，強制下一次渲染時清空上傳框
             st.session_state[uploader_key_name] += 1
-            # 3. 強制重整頁面，讓照片出現在下方，且上傳框變回空白
             st.rerun()
         # --------------------------------
         
