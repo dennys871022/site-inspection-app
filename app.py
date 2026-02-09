@@ -19,14 +19,20 @@ def get_taiwan_date():
     utc_now = datetime.datetime.now(timezone.utc)
     return (utc_now + timedelta(hours=8)).date()
 
-# --- 1. 設定收件人名單 (請在此修改) ---
-# 💡 這裡設定後，網頁上就會出現下拉選單
+# --- 1. 設定收件人名單 ---
 RECIPIENTS = {
-    "林憲睿": "dennys871022@fengyu.com.tw",
-    "翁育玟": "Vicky1019@fengyu.com.tw",
-    "林智捷": "ccl20010218@fengyu.com.tw",
+    "總公司工務部": "office_main@example.com",
+    "專案經理": "manager@example.com",
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
+
+# --- 常用協力廠商名單 (可在此新增) ---
+COMMON_SUB_CONTRACTORS = [
+    "川峻工程有限公司",
+    "豐譽營造股份有限公司",
+    "大漢工程",
+    "自行輸入..." # 必須保留這個選項
+]
 
 # --- 2. 終極內建資料庫 (維持不變) ---
 CHECKS_DB = {
@@ -252,17 +258,13 @@ def generate_names(selected_type, base_date):
     file_name = f"{roc_date_str}{full_item_name}"
     return full_item_name, file_name
 
-# --- Email 寄送功能 (使用 Secrets) ---
+# --- Email 寄送功能 ---
 def send_email_via_secrets(zip_bytes, filename, receiver_email, receiver_name):
-    """
-    透過 st.secrets 讀取帳密並寄信
-    """
-    # 讀取 Secrets
     try:
         sender_email = st.secrets["email"]["account"]
         sender_password = st.secrets["email"]["password"]
     except KeyError:
-        return False, "❌ 找不到 Secrets 設定！請檢查 secrets.toml 或雲端後台設定。"
+        return False, "❌ 找不到 Secrets 設定！請檢查 secrets.toml。"
 
     msg = MIMEMultipart()
     msg['From'] = sender_email
@@ -284,7 +286,6 @@ def send_email_via_secrets(zip_bytes, filename, receiver_email, receiver_name):
     msg.attach(part)
     
     try:
-        # 預設使用 Gmail SMTP 設定
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(sender_email, sender_password)
         server.send_message(msg)
@@ -323,7 +324,7 @@ def delete_photo(g_idx, index):
 
 # --- UI ---
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (自動化整合版)")
+st.title("🏗️ 工程自主檢查表 (手機優化版)")
 
 # Init
 if 'zip_buffer' not in st.session_state: st.session_state['zip_buffer'] = None
@@ -406,7 +407,15 @@ with st.sidebar:
     st.header("2. 專案資訊")
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
-    p_sub = st.text_input("協力廠商", "川峻工程有限公司")
+    
+    # --- 修改點 1: 協力廠商 下拉選單 + 輸入 ---
+    sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS)
+    if sub_select == "自行輸入...":
+        p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
+    else:
+        p_sub = sub_select
+    # -------------------------------------
+    
     p_loc = st.text_input("施作位置", "北棟 1F")
     base_date = st.date_input("日期", get_taiwan_date(), key='global_date', on_change=update_all_filenames)
 
@@ -435,8 +444,31 @@ if st.session_state['saved_template']:
         file_name_custom = st.text_input("自定義檔名", key=f"fname_{g}")
 
         st.markdown("##### 📸 照片上傳與排序")
-        new_files = st.file_uploader(f"新增照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"uploader_{g}")
-        if new_files: add_new_photos(g, new_files)
+        
+        # --- 修改點 2: 手機上傳優化邏輯 ---
+        # 為了讓上傳器能「自動清空」，我們使用動態 key
+        uploader_key_name = f"uploader_key_{g}"
+        if uploader_key_name not in st.session_state:
+            st.session_state[uploader_key_name] = 0
+            
+        # 使用動態 key，每次上傳成功後 key+1，強制 Streamlit 產生一個全新的上傳框
+        dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
+        
+        new_files = st.file_uploader(
+            f"點擊此處選擇照片 (第 {g+1} 組)", 
+            type=['jpg','png','jpeg'], 
+            accept_multiple_files=True, 
+            key=dynamic_key
+        )
+        
+        if new_files:
+            # 1. 處理照片
+            add_new_photos(g, new_files)
+            # 2. 改變 key，強制下一次渲染時清空上傳框
+            st.session_state[uploader_key_name] += 1
+            # 3. 強制重整頁面，讓照片出現在下方，且上傳框變回空白
+            st.rerun()
+        # --------------------------------
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
@@ -513,11 +545,9 @@ if st.session_state['saved_template']:
     st.markdown("---")
     st.subheader("🚀 執行操作")
     
-    # 選擇收件人 (位於按鈕上方)
     selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
     target_email = RECIPIENTS[selected_name]
 
-    # 按鈕
     if st.button("步驟 1：生成報告資料", type="primary", use_container_width=True):
         if not all_groups_data:
             st.error("⚠️ 請至少上傳一張照片並填寫資料")
@@ -543,7 +573,6 @@ if st.session_state['saved_template']:
                 st.session_state['zip_filename'] = f"檢查報告_{datetime.date.today()}.zip"
                 st.success("✅ 資料生成完畢！請選擇下一步：")
 
-    # 如果已經生成過，顯示下一步按鈕 (並排)
     if st.session_state['zip_buffer']:
         col_mail, col_dl = st.columns(2)
         
