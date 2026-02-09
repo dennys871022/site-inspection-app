@@ -22,16 +22,25 @@ def get_taiwan_date():
 
 # --- 1. 設定收件人名單 ---
 RECIPIENTS = {
-    "總公司工務部": "office_main@example.com",
-    "專案經理": "manager@example.com",
+    "范嘉文": "ses543212004@fengyu.com.tw",
+    "林憲睿": "dennys871022@fengyu.com.tw",
+    "翁育玟": "Vicky1019@fengyu.com.tw",
+    "林智捷": "ccl20010218@fengyu.com.tw",
+    "趙健鈞": "kk919472770@fengyu.com.tw",
+    "孫永明": "kevin891023@fengyu.com.tw",
+    "林泓鈺": "henry30817@fengyu.com.tw",
+    "黃元杰": "s10411097@fengyu.com.tw",
     "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
 }
 
 # --- 常用協力廠商名單 ---
 COMMON_SUB_CONTRACTORS = [
     "川峻工程有限公司",
-    "豐譽營造股份有限公司",
-    "大漢工程",
+    "世銓營造股份有限公司",
+    "互國企業有限公司",
+    "世和金屬股份有限公司",
+    "宥辰興業股份有限公司",
+    "亞東預拌混凝土股份有限公司",
     "自行輸入..." 
 ]
 
