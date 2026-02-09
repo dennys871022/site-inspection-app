@@ -286,7 +286,11 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
         if idx < len(photo_batch):
             data = photo_batch[idx]
             replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
-            spacer = "\u3000" * 6 
+            
+            # --- FIX: 改成 4 個全形空格 ---
+            spacer = "\u3000" * 4 
+            # ---------------------------
+            
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
             info_text += f"說明：{data['desc']}\n"
             info_text += f"實測：{data['result']}"
