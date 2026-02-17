@@ -22,12 +22,12 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 
 # ==========================================
-# 0. 雲端資料庫設定 
+# 0. 雲端資料庫設定 (★ 貼上您的「直接匯出」網址 ★)
 # ==========================================
-# 請將您從 Google 試算表「發佈到網路」取得的 CSV 網址貼在下方引號內
-# 例如: GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1v.../pub?output=csv"
+# 請將網址改為 /export?format=csv 的格式！
+# 範例: "https://docs.google.com/spreadsheets/d/您的ID/export?format=csv"
 
-GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRG58UCYSHwfTSQGnLJtbboIF_HQjEik7BJeH4dvEK7EM-HyaiJAgNGv3wBrgPJm4LNP0kY-vvfQxL0/pub?output=csv" 
+GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1ubR0wOJkOhA4IYyQ_Qq-LUldKwkEj084N45Ym04sKU8/export?format=csv" 
 
 # ==========================================
 # 1. 核心功能函式庫
@@ -238,8 +238,7 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
-# --- 雲端抓取與快取邏輯 (TTL=600 代表每 10 分鐘自動過期重新抓) ---
-@st.cache_data(ttl=600)
+# --- 雲端抓取邏輯 (★已移除快取，真正的零延遲★) ---
 def fetch_google_sheets_db(csv_url):
     try:
         df = pd.read_csv(csv_url)
@@ -277,6 +276,7 @@ def add_new_photos(g_idx, uploaded_files):
     init_group_photos(g_idx)
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
+    
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
@@ -297,7 +297,7 @@ def delete_photo(g_idx, index):
         del lst[index]
 
 # ==========================================
-# 2. 備用資料庫與常數設定 (當斷線或沒填網址時使用)
+# 2. 備用資料庫與常數設定
 # ==========================================
 
 RECIPIENTS = {
@@ -332,8 +332,7 @@ DEFAULT_CHECKS_DB = {
     ],
     "拆除工程-施工 (EA26)": [
         {"desc": "防護措施:公共管線及環境保護", "design": "", "result": "已完成相關防護措施，管線已封閉/遷移"},
-        {"desc": "安全監測:初始值測量", "design": "", "result": "已完成初始值測量及設置"},
-        {"desc": "降噪作為:低噪音機具", "design": "非衝擊式工法", "result": "使用低噪音機具"}
+        {"desc": "安全監測:初始值測量", "design": "", "result": "已完成初始值測量及設置"}
     ]
 }
 
@@ -342,21 +341,24 @@ DEFAULT_CHECKS_DB = {
 # ==========================================
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (自動同步雲端版)")
+st.title("🏗️ 工程自主檢查表 (即時雲端同步版)")
 
-# --- 自動載入雲端資料庫 ---
-if 'checks_db' not in st.session_state:
+# --- 載入最新資料的函式 ---
+def load_latest_db():
     if GOOGLE_SHEETS_CSV_URL.strip():
         success, result = fetch_google_sheets_db(GOOGLE_SHEETS_CSV_URL.strip())
         if success:
-            st.session_state['checks_db'] = result
+            return result
         else:
-            st.error(f"雲端資料庫載入失敗，使用預設資料。錯誤：{result}")
-            st.session_state['checks_db'] = DEFAULT_CHECKS_DB
-    else:
-        st.session_state['checks_db'] = DEFAULT_CHECKS_DB
+            st.error(f"雲端資料庫載入失敗：{result} (退回預設資料)")
+            return DEFAULT_CHECKS_DB
+    return DEFAULT_CHECKS_DB
 
-# Init
+# --- 網頁初次載入時，抓取一次資料存入專屬記憶體 ---
+if 'checks_db' not in st.session_state:
+    st.session_state['checks_db'] = load_latest_db()
+
+# Init Variables
 if 'merged_doc_buffer' not in st.session_state: st.session_state['merged_doc_buffer'] = None
 if 'merged_filename' not in st.session_state: st.session_state['merged_filename'] = ""
 if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
@@ -401,22 +403,18 @@ with st.sidebar:
     st.markdown("---")
     st.header("☁️ 雲端資料庫狀態")
     if GOOGLE_SHEETS_CSV_URL.strip():
-        st.success("✅ 已設定自動連線")
-        if st.button("🔄 強制同步最新雲端資料", use_container_width=True):
-            with st.spinner("📥 同步中..."):
-                fetch_google_sheets_db.clear() # 清除快取，強制重抓
-                success, result = fetch_google_sheets_db(GOOGLE_SHEETS_CSV_URL.strip())
-                if success:
-                    st.session_state['checks_db'] = result
-                    st.success("更新成功！")
-                    st.rerun()
-                else:
-                    st.error(result)
+        st.success("✅ 已綁定試算表")
+        # 這個按鈕一按下去，就會直接去下載最新資料並覆蓋記憶體
+        if st.button("🔄 點我強制同步最新資料", use_container_width=True, type="primary"):
+            with st.spinner("📥 正在抓取最新資料..."):
+                st.session_state['checks_db'] = load_latest_db()
+                st.success("更新完成！")
+                st.rerun()
     else:
-        st.warning("⚠️ 尚未設定 GOOGLE_SHEETS_CSV_URL。目前使用內建備用資料。")
+        st.warning("⚠️ 尚未設定 GOOGLE_SHEETS_CSV_URL。")
             
     st.markdown("---")
-    st.button("🗑️ 清除所有填寫資料", type="primary", on_click=clear_all_data, use_container_width=True)
+    st.button("🗑️ 清除所有填寫資料", on_click=clear_all_data, use_container_width=True)
 
     st.markdown("---")
     st.header("2. 專案資訊")
@@ -443,7 +441,6 @@ if st.session_state['saved_template']:
         db_options = list(st.session_state['checks_db'].keys())
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
-        # 初次載入或未設定時給予預設名稱
         if f"item_{g}" not in st.session_state:
             update_group_info(g)
             
