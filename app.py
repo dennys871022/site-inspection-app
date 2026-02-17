@@ -238,7 +238,7 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
-# --- 雲端抓取邏輯 (★已移除快取，真正的零延遲★) ---
+# --- 雲端抓取邏輯 (★已支援大標題向下填補 ffill) ---
 def fetch_google_sheets_db(csv_url):
     try:
         df = pd.read_csv(csv_url)
@@ -250,17 +250,30 @@ def fetch_google_sheets_db(csv_url):
                 return False, f"表單缺少必填欄位：{col}"
         
         new_db = {}
+        current_category = "未分類項目" # 預設大標題
+        
         for _, row in df.iterrows():
-            cat = str(row["分類"]).strip()
-            if not cat: continue 
-            
-            if cat not in new_db:
-                new_db[cat] = []
+            # 1. 處理大標題 (如果這行有寫分類，就更新 current_category)
+            cat_val = str(row["分類"]).strip()
+            if cat_val:
+                current_category = cat_val
                 
-            new_db[cat].append({
-                "desc": str(row["說明"]).strip(),
-                "design": str(row["設計"]).strip(),
-                "result": str(row["實測"]).strip()
+            # 2. 處理內容
+            desc = str(row["說明"]).strip()
+            design = str(row["設計"]).strip()
+            result = str(row["實測"]).strip()
+            
+            # 如果連說明都是空的，代表這是一行完全空白的排版行，直接跳過
+            if not desc:
+                continue 
+            
+            if current_category not in new_db:
+                new_db[current_category] = []
+                
+            new_db[current_category].append({
+                "desc": desc,
+                "design": design,
+                "result": result
             })
             
         return True, new_db
@@ -404,7 +417,6 @@ with st.sidebar:
     st.header("☁️ 雲端資料庫狀態")
     if GOOGLE_SHEETS_CSV_URL.strip():
         st.success("✅ 已綁定試算表")
-        # 這個按鈕一按下去，就會直接去下載最新資料並覆蓋記憶體
         if st.button("🔄 點我強制同步最新資料", use_container_width=True, type="primary"):
             with st.spinner("📥 正在抓取最新資料..."):
                 st.session_state['checks_db'] = load_latest_db()
