@@ -22,12 +22,10 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 
 # ==========================================
-# 0. 雲端資料庫設定 (★ 貼上您的「直接匯出」網址 ★)
+# 0. 雲端資料庫設定
 # ==========================================
-# 請將網址改為 /export?format=csv 的格式！
-# 範例: "https://docs.google.com/spreadsheets/d/您的ID/export?format=csv"
-
-GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1ubR0wOJkOhA4IYyQ_Qq-LUldKwkEj084N45Ym04sKU8/export?format=csv" 
+# 已自動帶入您的專屬零延遲 Google 試算表 CSV 網址
+GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1ubR0wOJkOhA4IYyQ_Qq-LUldKwkEj084N45Ym04sKU8/export?format=csv"
 
 # ==========================================
 # 1. 核心功能函式庫
@@ -238,7 +236,6 @@ def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
     except Exception as e:
         return False, f"❌ 寄送失敗: {str(e)}"
 
-# --- 雲端抓取邏輯 (★已支援大標題向下填補 ffill) ---
 def fetch_google_sheets_db(csv_url):
     try:
         df = pd.read_csv(csv_url)
@@ -250,20 +247,17 @@ def fetch_google_sheets_db(csv_url):
                 return False, f"表單缺少必填欄位：{col}"
         
         new_db = {}
-        current_category = "未分類項目" # 預設大標題
+        current_category = "未分類項目"
         
         for _, row in df.iterrows():
-            # 1. 處理大標題 (如果這行有寫分類，就更新 current_category)
             cat_val = str(row["分類"]).strip()
             if cat_val:
                 current_category = cat_val
                 
-            # 2. 處理內容
             desc = str(row["說明"]).strip()
             design = str(row["設計"]).strip()
             result = str(row["實測"]).strip()
             
-            # 如果連說明都是空的，代表這是一行完全空白的排版行，直接跳過
             if not desc:
                 continue 
             
@@ -340,12 +334,8 @@ COMMON_SUB_CONTRACTORS = [
 ]
 
 DEFAULT_CHECKS_DB = {
-    "預設資料 (請至程式碼設定 CSV 網址)": [
+    "預設資料 (雲端連結失敗時顯示)": [
         {"desc": "這是一個預設項目", "design": "設定範例", "result": "實測範例"}
-    ],
-    "拆除工程-施工 (EA26)": [
-        {"desc": "防護措施:公共管線及環境保護", "design": "", "result": "已完成相關防護措施，管線已封閉/遷移"},
-        {"desc": "安全監測:初始值測量", "design": "", "result": "已完成初始值測量及設置"}
     ]
 }
 
@@ -354,9 +344,8 @@ DEFAULT_CHECKS_DB = {
 # ==========================================
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (即時雲端同步版)")
+st.title("🏗️ 工程自主檢查表 (主控同步雲端版)")
 
-# --- 載入最新資料的函式 ---
 def load_latest_db():
     if GOOGLE_SHEETS_CSV_URL.strip():
         success, result = fetch_google_sheets_db(GOOGLE_SHEETS_CSV_URL.strip())
@@ -367,7 +356,6 @@ def load_latest_db():
             return DEFAULT_CHECKS_DB
     return DEFAULT_CHECKS_DB
 
-# --- 網頁初次載入時，抓取一次資料存入專屬記憶體 ---
 if 'checks_db' not in st.session_state:
     st.session_state['checks_db'] = load_latest_db()
 
@@ -388,11 +376,31 @@ def update_group_info(g_idx):
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, _ = generate_names(selected_type, base_date)
     st.session_state[f"item_{g_idx}"] = item_name
-    keys_to_clear = [k for k in st.session_state.keys() if f"_{g_idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
-    for k in keys_to_clear: del st.session_state[k]
-    if f"photos_{g_idx}" in st.session_state:
-        for p in st.session_state[f"photos_{g_idx}"]:
-            p['desc'] = ""; p['design'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
+    
+    # 清理內部小函式：清空選定組別的照片下拉與文字
+    def clear_group_data(idx):
+        keys_to_clear = [k for k in st.session_state.keys() if f"_{idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
+        for k in keys_to_clear: del st.session_state[k]
+        if f"photos_{idx}" in st.session_state:
+            for p in st.session_state[f"photos_{idx}"]:
+                p['desc'] = ""; p['design'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
+
+    clear_group_data(g_idx)
+    
+    # ==========================================
+    # ★ 關鍵邏輯：如果是改變了「第 1 組」 (g_idx == 0)
+    # 則強制將其他的組別通通切換成一樣的選項
+    # ==========================================
+    if g_idx == 0:
+        current_num_groups = st.session_state.get('num_groups', 1)
+        for other_g in range(1, current_num_groups):
+            # 強制更新選項
+            st.session_state[f"type_{other_g}"] = selected_type
+            # 強制更新名稱
+            other_item_name, _ = generate_names(selected_type, base_date)
+            st.session_state[f"item_{other_g}"] = other_item_name
+            # 同步清空資料
+            clear_group_data(other_g)
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
@@ -416,7 +424,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("☁️ 雲端資料庫狀態")
     if GOOGLE_SHEETS_CSV_URL.strip():
-        st.success("✅ 已綁定試算表")
+        st.success("✅ 已綁定專屬試算表")
         if st.button("🔄 點我強制同步最新資料", use_container_width=True, type="primary"):
             with st.spinner("📥 正在抓取最新資料..."):
                 st.session_state['checks_db'] = load_latest_db()
@@ -451,6 +459,13 @@ if st.session_state['saved_template']:
         st.subheader(f"📂 第 {g+1} 組")
         c1, c2, c3 = st.columns([2, 2, 1])
         db_options = list(st.session_state['checks_db'].keys())
+        
+        # ==========================================
+        # ★ 關鍵邏輯：剛新增第 2 組以上時，自動預設帶入第 1 組的選項
+        # ==========================================
+        if g > 0 and f"type_{g}" not in st.session_state and "type_0" in st.session_state:
+            st.session_state[f"type_{g}"] = st.session_state["type_0"]
+            
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
         if f"item_{g}" not in st.session_state:
