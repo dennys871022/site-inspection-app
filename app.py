@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 
 # ==========================================
-# 0. 雲端資料庫設定 (★ 請在這裡貼上您的 CSV 網址 ★)
+# 0. 雲端資料庫設定 (https://docs.google.com/spreadsheets/d/e/2PACX-1vRG58UCYSHwfTSQGnLJtbboIF_HQjEik7BJeH4dvEK7EM-HyaiJAgNGv3wBrgPJm4LNP0kY-vvfQxL0/pub?output=csv)
 # ==========================================
 # 請將您從 Google 試算表「發佈到網路」取得的 CSV 網址貼在下方引號內
 # 例如: GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1v.../pub?output=csv"
