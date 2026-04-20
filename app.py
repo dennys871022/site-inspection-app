@@ -24,7 +24,6 @@ from email.mime.application import MIMEApplication
 # ==========================================
 # 0. 雲端資料庫設定
 # ==========================================
-# 已自動帶入您的專屬零延遲 Google 試算表 CSV 網址
 GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1ubR0wOJkOhA4IYyQ_Qq-LUldKwkEj084N45Ym04sKU8/export?format=csv"
 
 # ==========================================
@@ -370,14 +369,29 @@ if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PA
     with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
         st.session_state['saved_template'] = f.read()
 
-# Callbacks
+# ==========================================
+# ★ 連動邏輯：文字修改後自動推播給其他組
+# ==========================================
+def on_item_0_change():
+    if "item_0" in st.session_state:
+        base_name = st.session_state["item_0"]
+        # 移除原本尾部的 #1，確保乾淨的主檔名
+        if base_name.endswith("#1"):
+            base_name = base_name[:-2].strip()
+            
+        num = st.session_state.get('num_groups', 1)
+        for other_g in range(1, num):
+            # 自動推播並加上自己的編號
+            st.session_state[f"item_{other_g}"] = f"{base_name}#{other_g + 1}"
+
 def update_group_info(g_idx):
     base_date = st.session_state.get('global_date', datetime.date.today())
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, _ = generate_names(selected_type, base_date)
-    st.session_state[f"item_{g_idx}"] = item_name
     
-    # 清理內部小函式：清空選定組別的照片下拉與文字
+    # ★ 自動加上 #1, #2 等編號
+    st.session_state[f"item_{g_idx}"] = f"{item_name}#{g_idx + 1}"
+    
     def clear_group_data(idx):
         keys_to_clear = [k for k in st.session_state.keys() if f"_{idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
         for k in keys_to_clear: del st.session_state[k]
@@ -387,19 +401,12 @@ def update_group_info(g_idx):
 
     clear_group_data(g_idx)
     
-    # ==========================================
-    # ★ 關鍵邏輯：如果是改變了「第 1 組」 (g_idx == 0)
-    # 則強制將其他的組別通通切換成一樣的選項
-    # ==========================================
     if g_idx == 0:
         current_num_groups = st.session_state.get('num_groups', 1)
         for other_g in range(1, current_num_groups):
-            # 強制更新選項
             st.session_state[f"type_{other_g}"] = selected_type
-            # 強制更新名稱
-            other_item_name, _ = generate_names(selected_type, base_date)
-            st.session_state[f"item_{other_g}"] = other_item_name
-            # 同步清空資料
+            # 確保同步時，其他組別擁有正確的 #2, #3 編號
+            st.session_state[f"item_{other_g}"] = f"{item_name}#{other_g + 1}"
             clear_group_data(other_g)
 
 def clear_all_data():
@@ -461,17 +468,27 @@ if st.session_state['saved_template']:
         db_options = list(st.session_state['checks_db'].keys())
         
         # ==========================================
-        # ★ 關鍵邏輯：剛新增第 2 組以上時，自動預設帶入第 1 組的選項
+        # ★ 剛新增組別時，自動預設帶入第一組的選項及名稱
         # ==========================================
         if g > 0 and f"type_{g}" not in st.session_state and "type_0" in st.session_state:
             st.session_state[f"type_{g}"] = st.session_state["type_0"]
+            if "item_0" in st.session_state:
+                base_name = st.session_state["item_0"]
+                if base_name.endswith("#1"):
+                    base_name = base_name[:-2].strip()
+                st.session_state[f"item_{g}"] = f"{base_name}#{g + 1}"
             
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
         if f"item_{g}" not in st.session_state:
             update_group_info(g)
             
-        g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
+        # ★ 第一組綁定 on_change，只要修改就會同步全場
+        if g == 0:
+            g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}", on_change=on_item_0_change)
+        else:
+            g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
+            
         roc_year = base_date.year - 1911
         date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
         c3.text(f"日期: {date_display}")
