@@ -382,7 +382,7 @@ def on_item_0_change():
         num = st.session_state.get('num_groups', 1)
         for other_g in range(1, num):
             # 自動推播並加上自己的編號
-            st.session_state[f"item_{other_g}"] = f"{base_name}#{other_g + 1}"
+            st.session_state[f"item_{other_g}"] = f"{base_name}      #{other_g + 1}"
 
 def update_group_info(g_idx):
     base_date = st.session_state.get('global_date', datetime.date.today())
