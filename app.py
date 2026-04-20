@@ -370,27 +370,31 @@ if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PA
         st.session_state['saved_template'] = f.read()
 
 # ==========================================
-# ★ 連動邏輯：文字修改後自動推播給其他組
+# ★ 連動邏輯：文字修改後自動推播給其他組 (加入 3 大格空格)
 # ==========================================
 def on_item_0_change():
     if "item_0" in st.session_state:
         base_name = st.session_state["item_0"]
-        # 移除原本尾部的 #1，確保乾淨的主檔名
-        if base_name.endswith("#1"):
-            base_name = base_name[:-2].strip()
+        
+        # 智慧過濾：移除結尾的空格與 #數字，確保我們拿到最純淨的主檔名
+        base_name = re.sub(r'(\u3000|\s)*#\d+$', '', base_name)
             
         num = st.session_state.get('num_groups', 1)
+        spacer = "\u3000" * 3  # 3個全形大空格
+        
         for other_g in range(1, num):
-            # 自動推播並加上自己的編號
-            st.session_state[f"item_{other_g}"] = f"{base_name}      #{other_g + 1}"
+            # 自動推播並加上 3個空格與自己的編號
+            st.session_state[f"item_{other_g}"] = f"{base_name}{spacer}#{other_g + 1}"
 
 def update_group_info(g_idx):
     base_date = st.session_state.get('global_date', datetime.date.today())
     selected_type = st.session_state[f"type_{g_idx}"]
     item_name, _ = generate_names(selected_type, base_date)
     
-    # ★ 自動加上 #1, #2 等編號
-    st.session_state[f"item_{g_idx}"] = f"{item_name}      #{g_idx + 1}"
+    spacer = "\u3000" * 3  # 3個全形大空格
+    
+    # ★ 自動加上 3個大空格 與 #1, #2 等編號
+    st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{g_idx + 1}"
     
     def clear_group_data(idx):
         keys_to_clear = [k for k in st.session_state.keys() if f"_{idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
@@ -405,8 +409,8 @@ def update_group_info(g_idx):
         current_num_groups = st.session_state.get('num_groups', 1)
         for other_g in range(1, current_num_groups):
             st.session_state[f"type_{other_g}"] = selected_type
-            # 確保同步時，其他組別擁有正確的 #2, #3 編號
-            st.session_state[f"item_{other_g}"] = f"{item_name}#{other_g + 1}"
+            # 確保同步時，其他組別擁有正確的 空格+#2, #3 編號
+            st.session_state[f"item_{other_g}"] = f"{item_name}{spacer}#{other_g + 1}"
             clear_group_data(other_g)
 
 def clear_all_data():
@@ -468,15 +472,15 @@ if st.session_state['saved_template']:
         db_options = list(st.session_state['checks_db'].keys())
         
         # ==========================================
-        # ★ 剛新增組別時，自動預設帶入第一組的選項及名稱
+        # ★ 剛新增組別時，自動預設帶入第一組的選項及名稱 (加入大空格)
         # ==========================================
         if g > 0 and f"type_{g}" not in st.session_state and "type_0" in st.session_state:
             st.session_state[f"type_{g}"] = st.session_state["type_0"]
             if "item_0" in st.session_state:
                 base_name = st.session_state["item_0"]
-                if base_name.endswith("#1"):
-                    base_name = base_name[:-2].strip()
-                st.session_state[f"item_{g}"] = f"{base_name}#{g + 1}"
+                base_name = re.sub(r'(\u3000|\s)*#\d+$', '', base_name)
+                spacer = "\u3000" * 3
+                st.session_state[f"item_{g}"] = f"{base_name}{spacer}#{g + 1}"
             
         selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
         
