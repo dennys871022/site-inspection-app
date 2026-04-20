@@ -390,7 +390,7 @@ def update_group_info(g_idx):
     item_name, _ = generate_names(selected_type, base_date)
     
     # ★ 自動加上 #1, #2 等編號
-    st.session_state[f"item_{g_idx}"] = f"{item_name}   #{g_idx + 1}"
+    st.session_state[f"item_{g_idx}"] = f"{item_name}      #{g_idx + 1}"
     
     def clear_group_data(idx):
         keys_to_clear = [k for k in st.session_state.keys() if f"_{idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
