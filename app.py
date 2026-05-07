@@ -1,651 +1,363 @@
 import streamlit as st
-try:
-    import pkg_resources
-except ImportError:
-    import setuptools
-
-from docx import Document
-from docx.shared import Cm, Pt
-from docx.oxml.ns import qn
-from docxcompose.composer import Composer
-from PIL import Image
-import io
-import datetime
-from datetime import timedelta, timezone
-import os
-import zipfile
 import pandas as pd
-import smtplib
+import plotly.express as px
 import re
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
+import datetime
+import io
+import xlsxwriter.utility
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# ==========================================
-# 0. 雲端資料庫設定
-# ==========================================
-GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1ubR0wOJkOhA4IYyQ_Qq-LUldKwkEj084N45Ym04sKU8/export?format=csv"
+try:
+    import matplotlib.pyplot as plt
+    from adjustText import adjust_text
+    MATPLOTLIB_READY = True
+except ImportError:
+    MATPLOTLIB_READY = False
 
-# ==========================================
-# 1. 核心功能函式庫
-# ==========================================
+st.set_page_config(page_title="UN023 排樁進度系統 V22", layout="wide")
+st.title("🏗️ UN023 排樁進度管理 (版面客製化版)")
 
-def get_taiwan_date():
-    utc_now = datetime.datetime.now(timezone.utc)
-    return (utc_now + timedelta(hours=8)).date()
-
-def get_paragraph_style(paragraph):
-    style = {}
-    if paragraph.runs:
-        run = paragraph.runs[0]
-        style['font_name'] = run.font.name
-        style['font_size'] = run.font.size
-        style['bold'] = run.bold
-        style['italic'] = run.italic
-        style['underline'] = run.underline
-        style['color'] = run.font.color.rgb
+@st.cache_resource
+def setup_chinese_font():
+    import os
+    import urllib.request
+    import matplotlib.font_manager as fm
+    font_path = 'NotoSansCJKtc-Regular.otf'
+    if not os.path.exists(font_path):
         try:
-            rPr = run._element.rPr
-            if rPr is not None and rPr.rFonts is not None:
-                style['eastAsia'] = rPr.rFonts.get(qn('w:eastAsia'))
-        except: pass
-    return style
+            url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf"
+            urllib.request.urlretrieve(url, font_path)
+        except Exception as e:
+            pass
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        return fm.FontProperties(fname=font_path).get_name()
+    return None
 
-def apply_style_to_run(run, style):
-    if not style: return
-    if style.get('font_name'): run.font.name = style.get('font_name')
-    if style.get('font_size'): run.font.size = style['font_size']
-    if style.get('bold') is not None: run.bold = style['bold']
-    if style.get('italic') is not None: run.italic = style['italic']
-    if style.get('underline') is not None: run.underline = style['underline']
-    if style.get('color'): run.font.color.rgb = style['color']
-    if style.get('eastAsia'):
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), style['eastAsia'])
-    elif style.get('font_name') == 'Times New Roman':
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), '標楷體')
-
-def compress_image(image_file, max_width=800):
-    img = Image.open(image_file)
-    if img.mode == 'RGBA': img = img.convert('RGB')
+@st.cache_data
+def load_base_data():
     try:
-        from PIL import ImageOps
-        img = ImageOps.exif_transpose(img)
-    except: pass
-    ratio = max_width / float(img.size[0])
-    if ratio < 1:
-        h_size = int((float(img.size[1]) * float(ratio)))
-        img = img.resize((max_width, h_size), Image.Resampling.LANCZOS)
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='JPEG', quality=75)
-    img_byte_arr.seek(0)
-    return img_byte_arr
-
-def replace_text_content(doc, replacements):
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    replace_paragraph_pure(paragraph, replacements)
-    for paragraph in doc.paragraphs:
-        replace_paragraph_pure(paragraph, replacements)
-
-def replace_paragraph_pure(paragraph, replacements):
-    if not paragraph.text: return
-    original_text = paragraph.text
-    needs_replace = False
-    for key in replacements:
-        if key in original_text:
-            needs_replace = True
-            break
-    if needs_replace:
-        saved_style = get_paragraph_style(paragraph)
-        new_text = original_text
-        for key, value in replacements.items():
-            val_str = str(value) if value is not None else ""
-            new_text = new_text.replace(key, val_str)
-        paragraph.clear()
-        new_run = paragraph.add_run(new_text)
-        apply_style_to_run(new_run, saved_style)
-
-def replace_placeholder_with_image(doc, placeholder, image_stream):
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    if placeholder in paragraph.text:
-                        align = paragraph.alignment
-                        paragraph.clear()
-                        paragraph.alignment = align
-                        run = paragraph.add_run()
-                        if image_stream:
-                            run.add_picture(image_stream, width=Cm(8.0))
-                        return
-
-def remove_element(element):
-    parent = element.getparent()
-    if parent is not None:
-        parent.remove(element)
-
-def truncate_doc_after_page_break(doc):
-    body = doc.element.body
-    break_index = -1
-    for i, element in enumerate(body):
-        if element.tag.endswith('p'):
-            if 'w:br' in element.xml and 'type="page"' in element.xml:
-                break_index = i
-                break
-    if break_index != -1:
-        for i in range(len(body) - 1, break_index - 1, -1):
-            if body[i].tag.endswith('sectPr'):
-                continue
-            remove_element(body[i])
-
-def generate_single_page(template_bytes, context, photo_batch, start_no):
-    doc = Document(io.BytesIO(template_bytes))
-    text_replacements = {f"{{{k}}}": v for k, v in context.items()}
-    replace_text_content(doc, text_replacements)
-    
-    for i in range(1, 9):
-        img_key = f"{{img_{i}}}"
-        info_key = f"{{info_{i}}}"
-        idx = i - 1
-        if idx < len(photo_batch):
-            data = photo_batch[idx]
-            replace_placeholder_with_image(doc, img_key, compress_image(data['file']))
-            
-            spacer = "\u3000" * 4 
-            
-            info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
-            info_text += f"說明：{data['desc']}\n"
-            
-            if data.get('design') and data['design'].strip():
-                info_text += f"設計：{data['design']}\n"
-                
-            info_text += f"實測：{data['result']}"
-            
-            replace_text_content(doc, {info_key: info_text})
-        else:
-            pass 
-
-    if len(photo_batch) <= 4:
-        truncate_doc_after_page_break(doc)
-    
-    final_clean = {}
-    for i in range(1, 9):
-        final_clean[f"{{img_{i}}}"] = ""
-        final_clean[f"{{info_{i}}}"] = ""
-    replace_text_content(doc, final_clean)
-
-    return doc
-
-def generate_names(selected_type, base_date):
-    clean_type = selected_type.split(' (EA')[0].split(' (EB')[0]
-    suffix = "自主檢查"
-    if "施工" in clean_type or "混凝土" in clean_type:
-        suffix = "施工自主檢查"
-        clean_type = clean_type.replace("-施工", "")
-    elif "材料" in clean_type:
-        suffix = "材料進場自主檢查"
-        clean_type = clean_type.replace("-材料", "")
-    elif "有價廢料" in clean_type:
-        suffix = "有價廢料清運自主檢查"
-        clean_type = clean_type.replace("-有價廢料", "")
-    
-    match = re.search(r'(\(.*\))', clean_type)
-    extra_info = ""
-    if match:
-        extra_info = match.group(1) 
-        clean_type = clean_type.replace(extra_info, "").strip() 
+        try:
+            df = pd.read_csv('排樁座標.csv', encoding='utf-8')
+        except:
+            df = pd.read_csv('排樁座標.csv', encoding='big5')
         
-    full_item_name = f"{clean_type}{suffix}{extra_info}"
-    
-    roc_year = base_date.year - 1911
-    roc_date_str = f"{roc_year}{base_date.month:02d}{base_date.day:02d}"
-    file_name = f"{roc_date_str}{full_item_name}"
-    return full_item_name, file_name
-
-def generate_clean_filename_base(selected_type, base_date):
-    _, file_name = generate_names(selected_type, base_date)
-    return file_name
-
-def send_email_via_secrets(doc_bytes, filename, receiver_email, receiver_name):
-    try:
-        sender_email = st.secrets["email"]["account"]
-        sender_password = st.secrets["email"]["password"]
-    except KeyError:
-        return False, "❌ 找不到 Secrets 設定！請檢查 secrets.toml。"
-
-    msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
-    msg['Subject'] = f"[自動回報] {filename.replace('.docx', '')}"
-    
-    body = f"""收件人：{receiver_name}\n\n這是由系統自動生成的檢查表彙整：{filename}\n內含所有檢查項目。\n\n(由 Streamlit 雲端系統自動發送)"""
-    msg.attach(MIMEText(body, 'plain'))
-    part = MIMEApplication(doc_bytes, Name=filename)
-    part['Content-Disposition'] = f'attachment; filename="{filename}"'
-    msg.attach(part)
-    
-    try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
-        server.quit()
-        return True, f"✅ 寄送成功！已寄給 {receiver_name} ({receiver_email})"
+        x_col = next((c for c in df.columns if 'X' in c.upper() or '座標' in c), None)
+        y_col = next((c for c in df.columns if 'Y' in c.upper() or '座標' in c), None)
+        text_col = next((c for c in df.columns if '內容' in c or '值' in c or '樁號' in c), None)
+        
+        df['樁號'] = df[text_col].apply(lambda x: re.sub(r'\\[^;]+;|[{}]', '', str(x)).strip().upper())
+        df = df[df['樁號'].str.match(r'^P\d+$')]
+        df['數字'] = df['樁號'].str.extract(r'(\d+)').astype(int)
+        df = df[(df['數字'] >= 1) & (df['數字'] <= 613)]
+        df['X'] = pd.to_numeric(df[x_col], errors='coerce')
+        df['Y'] = pd.to_numeric(df[y_col], errors='coerce')
+        return df.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字')
     except Exception as e:
-        return False, f"❌ 寄送失敗: {str(e)}"
+        st.error(f"底圖載入失敗: {e}")
+        return None
 
-def fetch_google_sheets_db(csv_url):
+df_base = load_base_data()
+
+def get_gs_connection():
     try:
-        df = pd.read_csv(csv_url)
-        df = df.fillna("")
-        
-        required_cols = ["分類", "說明", "設計", "實測"]
-        for col in required_cols:
-            if col not in df.columns:
-                return False, f"表單缺少必填欄位：{col}"
-        
-        new_db = {}
-        current_category = "未分類項目"
-        
-        for _, row in df.iterrows():
-            cat_val = str(row["分類"]).strip()
-            if cat_val:
-                current_category = cat_val
-                
-            desc = str(row["說明"]).strip()
-            design = str(row["設計"]).strip()
-            result = str(row["實測"]).strip()
-            
-            if not desc:
-                continue 
-            
-            if current_category not in new_db:
-                new_db[current_category] = []
-                
-            new_db[current_category].append({
-                "desc": desc,
-                "design": design,
-                "result": result
-            })
-            
-        return True, new_db
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        ss = client.open_by_url(st.secrets["sheet_url"])
+        try:
+            sh_main = ss.worksheet("施工明細")
+        except:
+            sh_main = ss.add_worksheet("施工明細", 1000, 20)
+            sh_main.append_row(['樁號', '施工日期', '機台', '施作順序', 'X', 'Y'])
+        try:
+            sh_chart = ss.worksheet("系統繪圖區")
+        except:
+            sh_chart = ss.add_worksheet("系統繪圖區", 700, 60)
+        return ss, sh_main, sh_chart
     except Exception as e:
-        return False, f"讀取失敗：{str(e)}"
+        st.error(f"雲端連線異常: {e}")
+        return None, None, None
 
-# --- 狀態管理函式 ---
-def init_group_photos(g_idx):
-    if f"photos_{g_idx}" not in st.session_state:
-        st.session_state[f"photos_{g_idx}"] = []
+def fetch_current_data(sh_main):
+    if sh_main is None: return pd.DataFrame(columns=['樁號', '施工日期', '機台', '施作順序', 'X', 'Y'])
+    try:
+        records = sh_main.get_all_records()
+        if not records: return pd.DataFrame(columns=['樁號', '施工日期', '機台', '施作順序', 'X', 'Y'])
+        df = pd.DataFrame(records)
+        df['樁號'] = df['樁號'].astype(str).str.upper().str.strip()
+        if '機台' not in df.columns: df['機台'] = 'A車'
+        df['施作順序'] = pd.to_numeric(df.get('施作順序', 0), errors='coerce').fillna(0)
+        return df
+    except:
+        return pd.DataFrame(columns=['樁號', '施工日期', '機台', '施作順序', 'X', 'Y'])
 
-def add_new_photos(g_idx, uploaded_files):
-    init_group_photos(g_idx)
-    current_list = st.session_state[f"photos_{g_idx}"]
-    existing_ids = {p['id'] for p in current_list}
-    
-    for f in uploaded_files:
-        file_id = f"{f.name}_{f.size}"
-        if file_id not in existing_ids:
-            current_list.append({
-                "id": file_id, "file": f, "desc": "", "design": "", "result": "", "selected_opt_index": 0 
-            })
-            existing_ids.add(file_id)
+ss, sh_main, sh_chart = get_gs_connection()
+df_history = fetch_current_data(sh_main)
 
-def move_photo(g_idx, index, direction):
-    lst = st.session_state[f"photos_{g_idx}"]
-    new_index = index + direction
-    if 0 <= new_index < len(lst):
-        lst[index], lst[new_index] = lst[new_index], lst[index]
-
-def delete_photo(g_idx, index):
-    lst = st.session_state[f"photos_{g_idx}"]
-    if 0 <= index < len(lst):
-        del lst[index]
-
-# ==========================================
-# 2. 備用資料庫與常數設定
-# ==========================================
-
-RECIPIENTS = {
-    "范嘉文": "ses543212004@fengyu.com.tw",
-    "林憲睿": "dennys871022@fengyu.com.tw",
-    "翁育玟": "Vicky1019@fengyu.com.tw",
-    "林智捷": "ccl20010218@fengyu.com.tw",
-    "趙健鈞": "kk919472770@fengyu.com.tw",
-    "孫永明": "kevin891023@fengyu.com.tw",
-    "林泓鈺": "henry30817@fengyu.com.tw",
-    "黃元杰": "s10411097@fengyu.com.tw",
-    "郭登慶": "tw850502@fengyu.com.tw",
-    "歐冠廷": "canon1220@fengyu.com.tw",
-    "黃彥榤": "ajh73684@fengyu.com.tw",
-    "陳昱勳": "x85082399@fengyu.com.tw",
-    "測試用 (寄給自己)": st.secrets["email"]["account"] if "email" in st.secrets else "test@example.com"
-}
-
-COMMON_SUB_CONTRACTORS = [
-    "川峻工程有限公司",
-    "世銓營造股份有限公司",
-    "互國企業有限公司",
-    "世和金屬股份有限公司",
-    "宥辰興業股份有限公司",
-    "亞東預拌混凝土股份有限公司",
-    "自行輸入..." 
-]
-
-DEFAULT_CHECKS_DB = {
-    "預設資料 (雲端連結失敗時顯示)": [
-        {"desc": "這是一個預設項目", "design": "設定範例", "result": "實測範例"}
-    ]
-}
-
-# ==========================================
-# 3. 主程式介面邏輯
-# ==========================================
-
-st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
-st.title("🏗️ 工程自主檢查表 (主控同步雲端版)")
-
-def load_latest_db():
-    if GOOGLE_SHEETS_CSV_URL.strip():
-        success, result = fetch_google_sheets_db(GOOGLE_SHEETS_CSV_URL.strip())
-        if success:
-            return result
-        else:
-            st.error(f"雲端資料庫載入失敗：{result} (退回預設資料)")
-            return DEFAULT_CHECKS_DB
-    return DEFAULT_CHECKS_DB
-
-if 'checks_db' not in st.session_state:
-    st.session_state['checks_db'] = load_latest_db()
-
-# Init Variables
-if 'merged_doc_buffer' not in st.session_state: st.session_state['merged_doc_buffer'] = None
-if 'merged_filename' not in st.session_state: st.session_state['merged_filename'] = ""
-if 'saved_template' not in st.session_state: st.session_state['saved_template'] = None
-if 'num_groups' not in st.session_state: st.session_state['num_groups'] = 1
-
-DEFAULT_TEMPLATE_PATH = "template.docx"
-if not st.session_state['saved_template'] and os.path.exists(DEFAULT_TEMPLATE_PATH):
-    with open(DEFAULT_TEMPLATE_PATH, "rb") as f:
-        st.session_state['saved_template'] = f.read()
-
-# ==========================================
-# ★ 連動邏輯：文字修改後自動推播給其他組 (加入 3 大格空格)
-# ==========================================
-def on_item_0_change():
-    if "item_0" in st.session_state:
-        base_name = st.session_state["item_0"]
-        
-        # 智慧過濾：移除結尾的空格與 #數字，確保我們拿到最純淨的主檔名
-        base_name = re.sub(r'(\u3000|\s)*#\d+$', '', base_name)
-            
-        num = st.session_state.get('num_groups', 1)
-        spacer = "\u3000" * 3  # 3個全形大空格
-        
-        for other_g in range(1, num):
-            # 自動推播並加上 3個空格與自己的編號
-            st.session_state[f"item_{other_g}"] = f"{base_name}{spacer}#{other_g + 1}"
-
-def update_group_info(g_idx):
-    base_date = st.session_state.get('global_date', datetime.date.today())
-    selected_type = st.session_state[f"type_{g_idx}"]
-    item_name, _ = generate_names(selected_type, base_date)
-    
-    spacer = "\u3000" * 3  # 3個全形大空格
-    
-    # ★ 自動加上 3個大空格 與 #1, #2 等編號
-    st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{g_idx + 1}"
-    
-    def clear_group_data(idx):
-        keys_to_clear = [k for k in st.session_state.keys() if f"_{idx}_" in k and (k.startswith("sel_") or k.startswith("desc_") or k.startswith("design_") or k.startswith("result_"))]
-        for k in keys_to_clear: del st.session_state[k]
-        if f"photos_{idx}" in st.session_state:
-            for p in st.session_state[f"photos_{idx}"]:
-                p['desc'] = ""; p['design'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
-
-    clear_group_data(g_idx)
-    
-    if g_idx == 0:
-        current_num_groups = st.session_state.get('num_groups', 1)
-        for other_g in range(1, current_num_groups):
-            st.session_state[f"type_{other_g}"] = selected_type
-            # 確保同步時，其他組別擁有正確的 空格+#2, #3 編號
-            st.session_state[f"item_{other_g}"] = f"{item_name}{spacer}#{other_g + 1}"
-            clear_group_data(other_g)
-
-def clear_all_data():
-    for key in list(st.session_state.keys()):
-        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'design_', 'result_')):
-            del st.session_state[key]
-    st.session_state['num_groups'] = 1
-    st.session_state['merged_doc_buffer'] = None
-    st.session_state['merged_filename'] = ""
-
-# Sidebar
-with st.sidebar:
-    st.header("1. 樣板設定")
-    if st.session_state['saved_template']:
-        st.success("✅ Word 樣板已載入")
+def process_status_logic(df_hist, df_b):
+    plot_df = df_b[['樁號', 'X', 'Y']].copy()
+    if df_hist.empty:
+        plot_df['狀態'] = '未完成'
+        plot_df['標籤'] = plot_df['樁號']
+        return plot_df
+    hist = df_hist.copy()
+    def label_maker(r):
+        m = str(r.get('機台', 'A'))[0]
+        s = r.get('施作順序', 0)
+        return f"{r['樁號']}({m}{int(s)})"
+    hist['標籤'] = hist.apply(label_maker, axis=1)
+    hist['施工日期_DT'] = pd.to_datetime(hist['施工日期'], errors='coerce')
+    max_date = hist['施工日期_DT'].max()
+    if pd.notna(max_date):
+        monday = max_date - pd.Timedelta(days=max_date.weekday())
+        def set_status(dt):
+            if pd.isna(dt): return '未完成'
+            if dt < monday: return '[已完成]'
+            return dt.strftime('%Y-%m-%d')
+        hist['狀態'] = hist['施工日期_DT'].apply(set_status)
     else:
-        uploaded = st.file_uploader("上傳樣板", type=['docx'])
-        if uploaded:
-            st.session_state['saved_template'] = uploaded.getvalue()
+        hist['狀態'] = '未完成'
+    plot_df = plot_df.merge(hist[['樁號', '狀態', '標籤']], on='樁號', how='left')
+    plot_df['狀態'] = plot_df['狀態'].fillna('未完成')
+    plot_df['標籤'] = plot_df['標籤'].fillna(plot_df['樁號'])
+    return plot_df
+
+def sync_to_chart_sheet():
+    ss_now, m_now, c_now = get_gs_connection()
+    if not ss_now or df_history.empty: return
+    try:
+        plot_df = process_status_logic(df_history, df_base)
+        gs_matrix = pd.DataFrame()
+        gs_matrix['X'] = plot_df['X']
+        gs_matrix['標籤'] = plot_df['標籤']
+        gs_matrix['未完成'] = plot_df['Y'].where(plot_df['狀態'] == '未完成', None)
+        gs_matrix['[已完成]'] = plot_df['Y'].where(plot_df['狀態'] == '[已完成]', None)
+        valid_dates = sorted([s for s in plot_df['狀態'].unique() if s not in ['未完成', '[已完成]']])
+        for d in valid_dates:
+            gs_matrix[d] = plot_df['Y'].where(plot_df['狀態'] == d, None)
+        gs_matrix = gs_matrix.astype(object).where(pd.notnull(gs_matrix), None)
+        out_data = [gs_matrix.columns.values.tolist()] + gs_matrix.values.tolist()
+        c_now.clear()
+        c_now.update("A1", out_data)
+        st.success("✅ 雲端繪圖數據已同步")
+    except Exception as e:
+        st.error(f"同步失敗: {e}")
+
+st.sidebar.header("📂 備份與同步")
+if st.sidebar.button("🔄 手動同步雲端數據"):
+    sync_to_chart_sheet()
+
+up_file = st.sidebar.file_uploader("匯入 Excel/CSV", type=['csv', 'xlsx'])
+if up_file:
+    try:
+        df_up = pd.read_excel(up_file, sheet_name='施工明細') if up_file.name.endswith('.xlsx') else pd.read_csv(up_file)
+        new_rows = []
+        curr_p = df_history['樁號'].tolist()
+        for _, row in df_up.iterrows():
+            p = str(row['樁號']).upper().strip()
+            if p not in curr_p:
+                b = df_base[df_base['樁號'] == p]
+                x, y = (b['X'].iloc[0], b['Y'].iloc[0]) if not b.empty else (0,0)
+                new_rows.append([p, str(row['施工日期']), str(row.get('機台','A車')), int(row.get('施作順序',1)), x, y])
+        if new_rows:
+            sh_main.append_rows(new_rows)
+            st.sidebar.success(f"已同步 {len(new_rows)} 筆")
+            sync_to_chart_sheet()
             st.rerun()
-            
-    st.markdown("---")
-    st.header("☁️ 雲端資料庫狀態")
-    if GOOGLE_SHEETS_CSV_URL.strip():
-        st.success("✅ 已綁定專屬試算表")
-        if st.button("🔄 點我強制同步最新資料", use_container_width=True, type="primary"):
-            with st.spinner("📥 正在抓取最新資料..."):
-                st.session_state['checks_db'] = load_latest_db()
-                st.success("更新完成！")
-                st.rerun()
+    except Exception as e: st.sidebar.error(f"還原失敗: {e}")
+
+st.markdown("### 📝 進度登錄")
+c1, c2, c3 = st.columns([1, 1, 2])
+work_date = str(c1.date_input("日期"))
+machine = c2.radio("機台", ["A車", "B車"], horizontal=True)
+mode = c3.radio("模式", ["4支一循環", "2支一循環"], horizontal=True)
+step = 4 if "4支" in mode else 2
+
+def save_data(piles):
+    if not piles or sh_main is None: return
+    m_data = df_history[df_history['機台'] == machine]
+    seq = 0 if m_data.empty else pd.to_numeric(m_data['施作順序']).max()
+    new_d = []
+    for p in piles:
+        p = p.upper().strip()
+        if p not in df_history['樁號'].values:
+            seq += 1
+            b = df_base[df_base['樁號'] == p]
+            x, y = (b['X'].iloc[0], b['Y'].iloc[0]) if not b.empty else (0, 0)
+            new_d.append([p, work_date, machine, int(seq), float(x), float(y)])
+    if new_d:
+        sh_main.append_rows(new_d)
+        sync_to_chart_sheet()
+        st.rerun()
+
+t1, t2 = st.tabs(["🎯 推算", "✏️ 手動"])
+with t1:
+    with st.form("a"):
+        cc1, cc2, cc3 = st.columns(3); sp = cc1.number_input("起始 P", 1, 613, 1)
+        dr = cc2.radio("方向", ["遞增", "遞減"]); ct = cc3.number_input("數量", 1, 100, 10)
+        if st.form_submit_button("登錄"):
+            plist = []; cur = sp
+            for _ in range(ct):
+                if 1 <= cur <= 613: plist.append(f"P{cur}")
+                cur = cur + step if dr == "遞增" else cur - step
+            save_data(plist)
+with t2:
+    with st.form("m"):
+        raw = st.text_input("區間 (1-50)")
+        if st.form_submit_button("登錄"):
+            plist = []
+            if raw:
+                pts = re.split(r'[,\s]+', re.sub(r'[pP]', '', raw))
+                for pt in pts:
+                    if '-' in pt:
+                        s, e = map(int, pt.split('-')); rs = step if s <= e else -step
+                        for n in range(s, e + (1 if s <= e else -1), rs): plist.append(f"P{n}")
+                    elif pt.isdigit(): plist.append(f"P{pt}")
+            save_data(plist)
+
+st.markdown("---")
+st.subheader("🗺️ 現場施工全區圖 (框選範圍即可局部導出 PDF)")
+
+df_p = process_status_logic(df_history, df_base)
+color_map = {'未完成': '#696969', '[已完成]': '#FFB6C1'}
+colors_seq = px.colors.qualitative.Plotly
+
+fig = px.scatter(
+    df_p, x='X', y='Y', text='標籤', color='狀態',
+    color_discrete_map=color_map, color_discrete_sequence=colors_seq,
+    custom_data=['樁號']
+)
+fig.update_traces(
+    textposition='top center', textfont=dict(size=8),
+    marker=dict(size=10, line=dict(width=1, color='white'))
+)
+fig.update_layout(xaxis_visible=False, yaxis=dict(scaleanchor="x", scaleratio=1, visible=False), height=950, plot_bgcolor='white', dragmode='pan')
+
+try:
+    selection_event = st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True}, on_select="rerun", selection_mode=('box', 'lasso'))
+    selected_piles = [pt["customdata"][0] for pt in selection_event["selection"]["points"]] if selection_event and "selection" in selection_event and selection_event["selection"]["points"] else []
+except TypeError:
+    st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+    selected_piles = []
+
+if not df_history.empty:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📄 PDF 報表自訂內容")
+    pdf_loc_note = st.sidebar.text_input("圖表右上角位置備註", "滯洪池BC")
+    pdf_week_est = st.sidebar.number_input("本週預計完成 (支)", min_value=0, value=36)
+    pdf_today_done = st.sidebar.number_input("本日完成 (支)", min_value=0, value=7)
+    pdf_cum_done = st.sidebar.number_input("累積完成 (支)", min_value=0, value=11)
+    
+    st.sidebar.markdown("### 📥 報表與圖面下載")
+    
+    def xl_gen(h_df, p_df):
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine='xlsxwriter') as wr:
+            h_df.to_excel(wr, sheet_name='施工明細', index=False)
+            wb = wr.book; ws = wb.add_worksheet('全區進度圖'); ch = wb.add_chart({'type': 'scatter'})
+            col = 10
+            states = ['未完成', '[已完成]'] + sorted([s for s in p_df['狀態'].unique() if s not in ['未完成', '[已完成]']])
+            colors = {'未完成': '#696969', '[已完成]': '#FFB6C1'}
+            fallback_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
+            color_idx = 0
+            for state in states:
+                sub_df = p_df[p_df['狀態'] == state].reset_index(drop=True)
+                if sub_df.empty: continue
+                sub_df[['X', 'Y', '標籤']].to_excel(wr, sheet_name='全區進度圖', startcol=col, index=False)
+                marker_color = colors.get(state)
+                if not marker_color:
+                    marker_color = fallback_colors[color_idx % len(fallback_colors)]
+                    color_idx += 1
+                series_data = {
+                    'name': state, 'categories': ['全區進度圖', 1, col, len(sub_df), col],
+                    'values': ['全區進度圖', 1, col+1, len(sub_df), col+1],
+                    'marker': {'type': 'circle', 'size': 6, 'fill': {'color': marker_color}, 'border': {'color': marker_color}}
+                }
+                if state != '未完成':
+                    clbls = [{'value': f'=全區進度圖!${xlsxwriter.utility.xl_col_to_name(col+2)}${ri+2}'} for ri in range(len(sub_df))]
+                    series_data['data_labels'] = {'custom': clbls, 'position': 'above', 'font': {'size': 8}}
+                ch.add_series(series_data)
+                col += 4
+            today_str = datetime.date.today().strftime('%Y-%m-%d')
+            ch.set_title({'name': f'{today_str} 施作進度回報'})
+            ch.set_size({'width': 2400, 'height': 1500})
+            ch.set_x_axis({'visible': False, 'major_gridlines': {'visible': False}})
+            ch.set_y_axis({'visible': False, 'major_gridlines': {'visible': False}})
+            ws.insert_chart('B2', ch)
+        return out.getvalue()
+    
+    st.sidebar.download_button("🟢 匯出 Excel (全區報表)", xl_gen(df_history, df_p), f"Report_{datetime.date.today()}.xlsx", type="secondary")
+
+    if not MATPLOTLIB_READY:
+        st.sidebar.error("⚠️ 請確保已在 GitHub 加入 matplotlib 與 adjustText")
     else:
-        st.warning("⚠️ 尚未設定 GOOGLE_SHEETS_CSV_URL。")
-            
-    st.markdown("---")
-    st.button("🗑️ 清除所有填寫資料", on_click=clear_all_data, use_container_width=True)
-
-    st.markdown("---")
-    st.header("2. 專案資訊")
-    p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
-    p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
-    sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS)
-    if sub_select == "自行輸入...":
-        p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
-    else:
-        p_sub = sub_select
-    p_loc = st.text_input("施作位置", "北棟 1F")
-    base_date = st.date_input("日期", get_taiwan_date(), key='global_date')
-
-# Main Body
-if st.session_state['saved_template']:
-    num_groups = st.number_input("本次產生幾組檢查表？", min_value=1, value=st.session_state['num_groups'], key='num_groups_input')
-    st.session_state['num_groups'] = num_groups
-    all_groups_data = []
-
-    for g in range(num_groups):
-        st.markdown(f"---")
-        st.subheader(f"📂 第 {g+1} 組")
-        c1, c2, c3 = st.columns([2, 2, 1])
-        db_options = list(st.session_state['checks_db'].keys())
-        
-        # ==========================================
-        # ★ 剛新增組別時，自動預設帶入第一組的選項及名稱 (加入大空格)
-        # ==========================================
-        if g > 0 and f"type_{g}" not in st.session_state and "type_0" in st.session_state:
-            st.session_state[f"type_{g}"] = st.session_state["type_0"]
-            if "item_0" in st.session_state:
-                base_name = st.session_state["item_0"]
-                base_name = re.sub(r'(\u3000|\s)*#\d+$', '', base_name)
-                spacer = "\u3000" * 3
-                st.session_state[f"item_{g}"] = f"{base_name}{spacer}#{g + 1}"
-            
-        selected_type = c1.selectbox(f"選擇檢查工項", db_options, key=f"type_{g}", on_change=update_group_info, args=(g,))
-        
-        if f"item_{g}" not in st.session_state:
-            update_group_info(g)
-            
-        # ★ 第一組綁定 on_change，只要修改就會同步全場
-        if g == 0:
-            g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}", on_change=on_item_0_change)
+        if selected_piles:
+            pdf_df = df_p[df_p['樁號'].isin(selected_piles)].copy()
+            pdf_btn_text = "🔴 匯出 PDF (您框選的局部範圍)"
         else:
-            g_item = c2.text_input(f"自檢項目名稱", key=f"item_{g}")
+            pdf_df = df_p.copy()
+            pdf_btn_text = "🔴 匯出 PDF (全區圖)"
+
+        def pdf_gen(p_df, loc_text, w_est, t_done, c_done):
+            font_name = setup_chinese_font()
+            if font_name:
+                plt.rcParams['font.family'] = font_name
+            else:
+                plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'PingFang TC']
+            plt.rcParams['axes.unicode_minus'] = False
             
-        roc_year = base_date.year - 1911
-        date_display = f"{roc_year}.{base_date.month:02d}.{base_date.day:02d}"
-        c3.text(f"日期: {date_display}")
+            fig = plt.figure(figsize=(24, 16))
+            ax = fig.add_axes([0.45, 0.1, 0.5, 0.8])
+            
+            states = ['未完成', '[已完成]'] + sorted([s for s in p_df['狀態'].unique() if s not in ['未完成', '[已完成]']])
+            colors = {'未完成': '#696969', '[已完成]': '#FFB6C1'}
+            fallback_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
+            color_idx = 0
+            
+            texts = []
+            for state in states:
+                sub_df = p_df[p_df['狀態'] == state]
+                if sub_df.empty: continue
+                c = colors.get(state)
+                if not c:
+                    c = fallback_colors[color_idx % len(fallback_colors)]
+                    color_idx += 1
+                ax.scatter(sub_df['X'], sub_df['Y'], label=state, color=c, s=15, zorder=2)
+                if state != '未完成':
+                    for _, row in sub_df.iterrows():
+                        texts.append(ax.text(row['X'], row['Y'], row['標籤'], fontsize=8, ha='center', va='center'))
 
-        st.markdown("##### 📸 照片上傳與排序")
-        uploader_key_name = f"uploader_key_{g}"
-        if uploader_key_name not in st.session_state: st.session_state[uploader_key_name] = 0
-        dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
-        
-        new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=dynamic_key)
-        if new_files:
-            add_new_photos(g, new_files)
-            st.session_state[uploader_key_name] += 1
-            st.rerun()
-        
-        if st.session_state.get(f"photos_{g}"):
-            if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
-                current_list = st.session_state[f"photos_{g}"]
-                for p in current_list:
-                    d_key = f"desc_{g}_{p['id']}"
-                    if d_key in st.session_state: p['desc'] = st.session_state[d_key]
-                    des_key = f"design_{g}_{p['id']}"
-                    if des_key in st.session_state: p['design'] = st.session_state[des_key]
-                    r_key = f"result_{g}_{p['id']}"
-                    if r_key in st.session_state: p['result'] = st.session_state[r_key]
-                    s_key = f"sel_{g}_{p['id']}"
-                    if s_key in st.session_state: p['selected_opt_index'] = st.session_state[s_key]
-                st.session_state[f"photos_{g}"].reverse()
-                st.rerun()
-        
-        init_group_photos(g)
-        photo_list = st.session_state[f"photos_{g}"]
-        
-        if photo_list:
-            check_items_list = st.session_state['checks_db'].get(selected_type, [])
-            options = ["(請選擇...)"] + [item['desc'] for item in check_items_list]
+            ax.margins(0.15)
+            adjust_text(texts, ax=ax, expand_points=(2.5, 2.5), expand_text=(1.5, 1.5), arrowprops=dict(arrowstyle='-', color='gray', lw=0.5, alpha=0.8), max_iterations=300)
+            ax.set_aspect('equal', adjustable='datalim')
+            ax.axis('off')
+            ax.set_title(loc_text, fontsize=45, fontweight='bold', pad=30)
+            
+            roc_year = datetime.date.today().year - 1911
+            today_md = f"{datetime.date.today().month:02d}/{datetime.date.today().day:02d}"
+            today_str = f"{roc_year}/{today_md}"
+            
+            monday = datetime.date.today() - datetime.timedelta(days=datetime.date.today().weekday())
+            sunday = monday + datetime.timedelta(days=6)
+            week_str = f"{monday.year-1911}/{monday.month:02d}/{monday.day:02d}~{sunday.year-1911}/{sunday.month:02d}/{sunday.day:02d}"
+            
+            fig.text(0.05, 0.85, f"{today_str} 施作進度回報", fontsize=50, fontweight='bold')
+            info_text = (
+                f"本週預計完成 {w_est} 支\n"
+                f"{week_str}\n"
+                f"本日完成 {t_done} 支\n"
+                f"{today_str}\n"
+                f"累積完成 {c_done} 支"
+            )
+            fig.text(0.08, 0.65, info_text, fontsize=35, linespacing=1.8, va='top')
+            
+            pdf_buf = io.BytesIO()
+            plt.savefig(pdf_buf, format='pdf', bbox_inches='tight')
+            plt.close(fig)
+            return pdf_buf.getvalue()
 
-            for i, photo_data in enumerate(photo_list):
-                with st.container():
-                    col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
-                    pid = photo_data['id']
-                    with col_img:
-                        st.image(photo_data['file'], use_container_width=True)
-                        st.caption(f"No. {i+1:02d}")
-                    with col_info:
-                        def on_select_change(pk=pid, gk=g):
-                            k = f"sel_{gk}_{pk}"
-                            if k not in st.session_state: return
-                            new_idx = st.session_state[k]
-                            dk, desk, rk = f"desc_{gk}_{pk}", f"design_{gk}_{pk}", f"result_{gk}_{pk}"
-                            if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(check_items_list):
-                                item_data = check_items_list[new_idx-1]
-                                st.session_state[dk] = item_data['desc']
-                                st.session_state[desk] = item_data['design']
-                                st.session_state[rk] = item_data['result']
-                            else:
-                                st.session_state[dk] = ""
-                                st.session_state[desk] = ""
-                                st.session_state[rk] = ""
-
-                        current_opt_idx = photo_data.get('selected_opt_index', 0)
-                        if current_opt_idx > len(options): current_opt_idx = 0
-                        st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
-
-                        def on_text_change(field, pk=pid, idx=i, gk=g): 
-                            val = st.session_state[f"{field}_{gk}_{pk}"]
-                            st.session_state[f"photos_{gk}"][idx][field] = val
-                            if field == 'sel': st.session_state[f"photos_{gk}"][idx]['selected_opt_index'] = val
-
-                        desc_key = f"desc_{g}_{pid}"
-                        design_key = f"design_{g}_{pid}"
-                        result_key = f"result_{g}_{pid}"
-                        if desc_key not in st.session_state: st.session_state[desc_key] = photo_data.get('desc', '')
-                        if design_key not in st.session_state: st.session_state[design_key] = photo_data.get('design', '')
-                        if result_key not in st.session_state: st.session_state[result_key] = photo_data.get('result', '')
-
-                        st.text_input("說明", key=desc_key, on_change=on_text_change, args=('desc',))
-                        st.text_input("設計 (可留空)", key=design_key, on_change=on_text_change, args=('design',))
-                        st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
-
-                    with col_ctrl:
-                        if st.button("⬆️", key=f"up_{g}_{i}"): move_photo(g, i, -1); st.rerun()
-                        if st.button("⬇️", key=f"down_{g}_{i}"): move_photo(g, i, 1); st.rerun()
-                        if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
-                    st.divider()
-
-            g_photos_export = []
-            for i, p in enumerate(photo_list):
-                d_val = st.session_state.get(f"desc_{g}_{p['id']}", p['desc'])
-                des_val = st.session_state.get(f"design_{g}_{p['id']}", p['design'])
-                r_val = st.session_state.get(f"result_{g}_{p['id']}", p['result'])
-                g_photos_export.append({
-                    "file": p['file'], "no": i + 1, "date_str": date_display, 
-                    "desc": d_val, "design": des_val, "result": r_val
-                })
-
-            all_groups_data.append({
-                "group_id": g+1,
-                "context": {
-                    "project_name": p_name, "contractor": p_cont, "sub_contractor": p_sub,
-                    "location": p_loc, "date": date_display, "check_item": g_item
-                },
-                "photos": g_photos_export
-            })
-
-    st.markdown("---")
-    st.subheader("🚀 執行操作")
-    default_filename = ""
-    if "type_0" in st.session_state:
-        default_filename = generate_clean_filename_base(st.session_state["type_0"], base_date)
-    else:
-        default_filename = f"自主檢查表_{get_taiwan_date()}"
-
-    final_file_name_input = st.text_input("📝 最終 Word 檔名", value=default_filename)
-    if not final_file_name_input.endswith(".docx"): final_file_name = final_file_name_input + ".docx"
-    else: final_file_name = final_file_name_input
-
-    selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
-    target_email = RECIPIENTS[selected_name]
-
-    if st.button("步驟 1：生成報告資料 (單一 Word 檔)", type="primary", use_container_width=True):
-        if not all_groups_data: st.error("⚠️ 請至少上傳一張照片並填寫資料")
-        else:
-            with st.spinner("📦 正在生成並合併 Word 檔案..."):
-                master_doc = None
-                composer = None
-                for group in all_groups_data:
-                    photos = group['photos']
-                    context = group['context']
-                    for page_idx, i in enumerate(range(0, len(photos), 8)):
-                        batch = photos[i : i+8]
-                        start_no = i + 1
-                        current_doc = generate_single_page(st.session_state['saved_template'], context, batch, start_no)
-                        if master_doc is None:
-                            master_doc = current_doc
-                            composer = Composer(master_doc)
-                        else:
-                            composer.append(current_doc)
-                out_buffer = io.BytesIO()
-                composer.save(out_buffer)
-                st.session_state['merged_doc_buffer'] = out_buffer.getvalue()
-                st.session_state['merged_filename'] = final_file_name
-                st.success(f"✅ 彙整完成！檔名：{final_file_name}")
-
-    if st.session_state['merged_doc_buffer']:
-        col_mail, col_dl = st.columns(2)
-        with col_mail:
-            if st.button(f"📧 立即寄出 Word 檔給：{selected_name}", use_container_width=True):
-                with st.spinner("📨 雲端發信中..."):
-                    success, msg = send_email_via_secrets(st.session_state['merged_doc_buffer'], st.session_state['merged_filename'], target_email, selected_name)
-                    if success: st.success(msg)
-                    else: st.error(msg)
-        with col_dl:
-            st.download_button(label="📥 下載 Word 檔案", data=st.session_state['merged_doc_buffer'], file_name=st.session_state['merged_filename'], mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
-else:
-    st.info("👈 請先在左側確認 Word 樣板")
+        st.sidebar.download_button(pdf_btn_text, pdf_gen(pdf_df, pdf_loc_note, pdf_week_est, pdf_today_done, pdf_cum_done), f"Plan_{datetime.date.today()}.pdf", type="primary")
