@@ -23,7 +23,7 @@ import streamlit.components.v1 as components
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date, diagnose
+from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date, diagnose, ping_models, GEMINI_MODEL_CHOICES
 
 # ==========================================
 # 0. 雲端資料庫設定
@@ -621,6 +621,7 @@ PREF_DEFAULTS = {
     "p_sub_custom": "川峻工程有限公司",
     "recipient": list(RECIPIENTS.keys())[0],
     "ai_fill_meta": True,
+    "ai_model": (AI_CFG or {}).get("model", ""),
 }
 
 def load_prefs_once():
@@ -661,6 +662,13 @@ def save_prefs_if_changed():
 
 load_prefs_once()
 
+# 側邊欄選的模型優先於 Secrets 設定（只對 Gemini 有效）
+if AI_CFG and AI_CFG["provider"] == "gemini":
+    _m = st.session_state.get("ai_model") or AI_CFG["model"]
+    if _m not in GEMINI_MODEL_CHOICES and _m != AI_CFG["model"]: _m = AI_CFG["model"]
+    st.session_state["ai_model"] = _m
+    AI_CFG = {**AI_CFG, "model": _m}
+
 # Sidebar
 with st.sidebar:
     st.header("1. 樣板設定")
@@ -693,6 +701,19 @@ with st.sidebar:
         st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
         ensure_pref("ai_fill_meta")
         st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
+        if AI_CFG["provider"] == "gemini":
+            model_opts = list(dict.fromkeys(GEMINI_MODEL_CHOICES + [st.session_state["ai_model"]]))
+            st.selectbox("AI 模型", model_opts, key="ai_model",
+                         help="lite 版較快、額度較多，但手寫字可能差一點；選擇會記在這台裝置")
+            if st.button("⚡ 測各模型速度", use_container_width=True):
+                with st.spinner("同時測試各模型（約 10～60 秒）..."):
+                    st.session_state["ai_ping"] = ping_models(AI_CFG)
+            for r in st.session_state.get("ai_ping", []):
+                note = f"｜被擋重試：{'、'.join(r['retries'])}" if r.get("retries") else ""
+                if r["ok"]:
+                    st.write(f"✅ {r['model']}：**{r['secs']} 秒**{note}")
+                else:
+                    st.write(f"❌ {r['model']}：{r['error']}{note}")
         if st.button("🩺 測試 AI 連線", use_container_width=True,
                      help="一步步測試 API Key、網路與辨識速度；第 1 組有照片的話會拿第 1 張來測"):
             first = (st.session_state.get("photos_0") or [None])[0]
