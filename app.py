@@ -509,6 +509,7 @@ def run_ai_on_group(g_idx, only_index=None):
     current_type = st.session_state.get(f"type_{g_idx}")
     msgs = []
 
+    t0 = datetime.datetime.now()
     if only_index is None:
         with st.spinner(f"🤖 AI 正在從 {len(targets)} 張照片中找出白板並辨識..."):
             results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type)
@@ -578,6 +579,7 @@ def run_ai_on_group(g_idx, only_index=None):
         nos = "、".join(f"No.{i+1:02d}" for i, e in errors if e == err)
         msgs.append(("error", f"{nos} 辨識失敗：{err}"))
 
+    secs = (datetime.datetime.now() - t0).total_seconds()
     board_nos = "、".join(f"No.{i+1:02d}" for i, _ in valid)
     if only_index is not None:
         if valid: msgs.insert(0, ("success", "✅ 已重新辨識這張白板，請確認內容"))
@@ -585,7 +587,7 @@ def run_ai_on_group(g_idx, only_index=None):
     elif valid:
         other = len(targets) - len(valid) - len(errors)
         msgs.insert(0, ("success", f"✅ 找到 {len(valid)} 張白板（{board_nos}）已自動填入；"
-                                   f"其他 {other} 張檢查照片未更動，請用下拉選單填寫"))
+                                   f"其他 {other} 張檢查照片未更動，請用下拉選單填寫（耗時 {secs:.0f} 秒）"))
     elif not errors:
         msgs.insert(0, ("warning", "這組照片裡沒有找到白板。若某張其實是白板，可按該張旁邊的 🤖 強制辨識"))
     st.session_state[f"ai_msg_{g_idx}"] = msgs
