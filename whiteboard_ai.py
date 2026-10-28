@@ -186,14 +186,19 @@ def _gemini_stream(cfg, g_parts, gen_cfg, stats=None, deadline=150):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:streamGenerateContent"
     body = {"contents": [{"parts": g_parts}], "generationConfig": gen_cfg}
     t0 = time.time()
+    retries = []  # 記錄被 Google 擋下重試的狀況（429 次數上限／503 伺服器忙碌）
     for attempt in range(4):
         r = requests.post(url, params={"key": cfg["api_key"], "alt": "sse"}, json=body,
                           stream=True, timeout=(15, 60))
+        if stats is not None:
+            stats["retries"] = retries
         if r.status_code == 200:
             break
         txt = r.text
         if r.status_code in (429, 500, 502, 503) and attempt < 3 and not _is_daily_quota(txt):
-            time.sleep(min(float(r.headers.get("retry-after", 0) or 0) or 2 ** attempt * 2, 20))
+            wait = min(float(r.headers.get("retry-after", 0) or 0) or 2 ** attempt * 2, 20)
+            retries.append(f"{r.status_code}（等 {wait:.0f} 秒）")
+            time.sleep(wait)
             continue
         if stats is not None:
             stats.update(status=r.status_code, secs=round(time.time() - t0, 1), error=txt[:300])
@@ -402,6 +407,29 @@ def recognize_one(cfg, file_obj, checks_db, current_category=None):
     """單張辨識：使用者手動指定這張是白板，用較高解析度"""
     return _recognize_batch(cfg, [file_obj], checks_db, current_category,
                             SINGLE_IMG_SIDE, True)[0]
+
+
+GEMINI_MODEL_CHOICES = [
+    "gemini-flash-latest",      # 最新 Flash（目前指向 3.8 Flash）
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+]
+
+
+def ping_models(cfg, models=GEMINI_MODEL_CHOICES):
+    """同時對幾個模型送一句話，比較哪個回得快"""
+    def one(m):
+        stats, t0 = {}, time.time()
+        try:
+            _call_gemini({**cfg, "model": m}, [("text", '只回傳 JSON：{"ok": true}')], stats)
+            return {"model": m, "ok": True, "secs": round(time.time() - t0, 1),
+                    "version": stats.get("model_version", ""), "retries": stats.get("retries", [])}
+        except Exception as e:
+            return {"model": m, "ok": False, "secs": round(time.time() - t0, 1), "error": _error_text(e),
+                    "retries": stats.get("retries", [])}
+    with ThreadPoolExecutor(max_workers=len(models)) as ex:
+        return list(ex.map(one, models))
 
 
 def diagnose(cfg, checks_db, file_obj=None):
