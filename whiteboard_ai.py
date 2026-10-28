@@ -205,6 +205,8 @@ def _gemini_stream(cfg, g_parts, gen_cfg, stats=None, deadline=150):
         return r.status_code, "", txt
 
     texts, finish, usage, version, first_chunk = [], None, {}, "", None
+    # Google 的串流回應沒有標明編碼，requests 會誤當成 Latin-1，中文變亂碼 → 一定要指定 UTF-8
+    r.encoding = "utf-8"
     for line in r.iter_lines(decode_unicode=True):
         if time.time() - t0 > deadline:
             r.close()
@@ -297,7 +299,7 @@ def _parse_json(text):
     m = re.search(r"[\{\[].*[\}\]]", text, re.S)
     if not m:
         raise ValueError(f"AI 回傳不是 JSON：{text[:200]}")
-    return json.loads(m.group(0))
+    return json.loads(m.group(0), strict=False)
 
 
 def _resolve_codes(result, checks_db):
