@@ -557,9 +557,9 @@ def run_ai_on_group(g_idx, only_index=None):
 
     valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board")]
 
-    # 1) 決定工項分類（整組辨識用多數決；單張辨識不動分類）＋自檢項目名稱
+    # 1) 決定工項分類（白板多數決，單張辨識也一樣會切換）＋自檢項目名稱
     final_type = current_type
-    if only_index is None and valid:
+    if valid:
         votes = {}
         for _, r in valid:
             if r.get("category"): votes[r["category"]] = votes.get(r["category"], 0) + 1
@@ -595,6 +595,7 @@ def run_ai_on_group(g_idx, only_index=None):
         }
 
     board_pos = [i for i, p in enumerate(photos) if p.get('is_board')]
+    filled = set()
     include_board = st.session_state.get("ai_board_first_item", True)
     for b, r in valid:
         items = r.get("items") or []
@@ -608,12 +609,22 @@ def run_ai_on_group(g_idx, only_index=None):
             vals["tag"] = f"白板 No.{b+1:02d} 的第 {k+1}/{len(items)} 項"
             vals["ai_vals"] = {f: vals[f] for f in ("desc", "design", "result", "opt")}
             _set_slot(g_idx, photos[slot], vals)
+            filled.add(slot)
         if len(items) > len(slots):
             left = "、".join(it["desc"] or "(未命名)" for it in items[len(slots):])
             msgs.append(("warning", f"白板 No.{b+1:02d} 還有 {len(items) - len(slots)} 項沒有照片可放：{left}"
                                     "（請多上傳照片，或用下拉選單手動填）"))
+        elif not items:
+            msgs.append(("warning", f"白板 No.{b+1:02d} 沒有讀到可對應的檢查項目，請用下拉選單手動選"))
         elif 0 < len(items) < len(slots):
             msgs.append(("info", f"白板 No.{b+1:02d} 讀到 {len(items)} 項，後面 {len(slots) - len(items)} 張照片保持原樣"))
+
+    # 工項換了：其他格原本選的下拉項目是舊工項的，會對錯，改回「請選擇」（文字保留）
+    if final_type != current_type:
+        for i, p in enumerate(photos):
+            if i not in filled:
+                p['selected_opt_index'] = 0
+                st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)
 
     # 3) 位置／日期帶入側邊欄（取第一張有讀到的）
     if st.session_state.get("ai_fill_meta", True):
