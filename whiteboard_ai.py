@@ -149,10 +149,12 @@ def build_prompt(checks_db, n, current_category=None, force_board=False):
 # ------------------------------------------------------------------
 # Gemini 的「思考」會讓回應慢好幾秒，讀白板用不到，盡量關掉。
 # 新舊模型參數不同，依序嘗試，成功的那組記下來之後直接用。
+# includeThoughts：讓模型思考時也持續回傳內容，連線才不會因為「一直沒回應」被判逾時
 _GEMINI_THINKING_OPTIONS = [
-    {"thinkingConfig": {"thinkingLevel": "minimal"}},   # Gemini 3 系列
-    {"thinkingConfig": {"thinkingBudget": 0}},          # Gemini 2.5 系列
-    {},                                                  # 都不支援就不帶
+    {"thinkingConfig": {"thinkingLevel": "minimal", "includeThoughts": True}},  # Gemini 3 系列
+    {"thinkingConfig": {"thinkingBudget": 0}},                                 # Gemini 2.5 系列
+    {"thinkingConfig": {"includeThoughts": True}},                             # 其他會思考的模型
+    {},                                                                         # 都不支援就不帶
 ]
 _gemini_thinking_ok = {}
 
@@ -176,36 +178,86 @@ def _post_with_retry(url, retries=3, **kw):
     return r
 
 
-def _call_gemini(cfg, parts):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:generateContent"
+def _gemini_stream(cfg, g_parts, gen_cfg, stats=None, deadline=150):
+    """
+    用串流方式呼叫 Gemini：模型一邊想一邊回傳，連線不會因為「思考太久沒回應」被判逾時。
+    回傳 (status_code, 文字, 錯誤內容)；stats 會記錄耗時、模型版本、token 用量等診斷資訊。
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:streamGenerateContent"
+    body = {"contents": [{"parts": g_parts}], "generationConfig": gen_cfg}
+    t0 = time.time()
+    for attempt in range(4):
+        r = requests.post(url, params={"key": cfg["api_key"], "alt": "sse"}, json=body,
+                          stream=True, timeout=(15, 60))
+        if r.status_code == 200:
+            break
+        txt = r.text
+        if r.status_code in (429, 500, 502, 503) and attempt < 3 and not _is_daily_quota(txt):
+            time.sleep(min(float(r.headers.get("retry-after", 0) or 0) or 2 ** attempt * 2, 20))
+            continue
+        if stats is not None:
+            stats.update(status=r.status_code, secs=round(time.time() - t0, 1), error=txt[:300])
+        return r.status_code, "", txt
+
+    texts, finish, usage, version, first_chunk = [], None, {}, "", None
+    for line in r.iter_lines(decode_unicode=True):
+        if time.time() - t0 > deadline:
+            r.close()
+            raise TimeoutError(f"AI 超過 {deadline} 秒還沒回完")
+        if not line or not line.startswith("data:"):
+            continue
+        if first_chunk is None:
+            first_chunk = round(time.time() - t0, 1)
+        try:
+            chunk = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        version = chunk.get("modelVersion", version)
+        usage = chunk.get("usageMetadata", usage)
+        for cand in chunk.get("candidates", [])[:1]:
+            finish = cand.get("finishReason", finish)
+            for prt in (cand.get("content") or {}).get("parts", []):
+                if not prt.get("thought") and prt.get("text"):
+                    texts.append(prt["text"])
+    if stats is not None:
+        stats.update(status=200, secs=round(time.time() - t0, 1), first_chunk=first_chunk,
+                     model_version=version, finish=finish,
+                     thoughts_tokens=usage.get("thoughtsTokenCount", 0),
+                     output_tokens=usage.get("candidatesTokenCount", 0),
+                     input_tokens=usage.get("promptTokenCount", 0))
+    if finish == "MAX_TOKENS":
+        raise ValueError("AI 回覆異常（輸出過長被截斷），請再按一次")
+    if finish in ("SAFETY", "RECITATION", "PROHIBITED_CONTENT"):
+        raise ValueError(f"AI 拒絕回覆（{finish}），請改用單張 🤖 辨識")
+    return 200, "".join(texts), ""
+
+
+def _call_gemini(cfg, parts, stats=None):
     g_parts = [
         {"text": v} if kind == "text" else {"inline_data": {"mime_type": "image/jpeg", "data": v}}
         for kind, v in parts
     ]
-    # 注意：不要把 temperature 調低。Gemini 3 系列官方建議維持預設 1.0，
-    # 調低容易讓輸出無限重複，一直寫到上限才停 → 就是「跑很久最後逾時」的元兇。
-    # maxOutputTokens 再加一道保險：就算模型鬼打牆，也會很快停下來。
+    # 不要把 temperature 調低：Gemini 3 系列官方建議維持預設，調低容易讓輸出重複鬼打牆。
     base_cfg = {"responseMimeType": "application/json", "maxOutputTokens": 8192}
     options = ([_gemini_thinking_ok[cfg["model"]]] if cfg["model"] in _gemini_thinking_ok
                else _GEMINI_THINKING_OPTIONS)
-    last = None
+    last = (0, "", "")
     for opt in options:
-        body = {"contents": [{"parts": g_parts}], "generationConfig": {**base_cfg, **opt}}
-        r = _post_with_retry(url, params={"key": cfg["api_key"]}, json=body, timeout=(10, 90))
-        last = r
-        if r.status_code == 400 and opt:
+        st_ = {} if stats is None else stats
+        st_.clear()
+        code, text, err = _gemini_stream(cfg, g_parts, {**base_cfg, **opt}, st_)
+        st_["thinking_option"] = json.dumps(opt) if opt else "(預設)"
+        last = (code, text, err)
+        if code == 400 and opt and "api_key" not in err.lower() and "api key" not in err.lower():
             continue  # 這個模型不吃這種 thinking 參數，換下一種
-        r.raise_for_status()
+        if code != 200:
+            break
         _gemini_thinking_ok[cfg["model"]] = opt
-        data = r.json()
-        cand = (data.get("candidates") or [{}])[0]
-        if cand.get("finishReason") == "MAX_TOKENS":
-            raise ValueError("AI 回覆異常（輸出過長被截斷），請再按一次")
-        if cand.get("finishReason") in ("SAFETY", "RECITATION", "PROHIBITED_CONTENT"):
-            raise ValueError(f"AI 拒絕回覆（{cand.get('finishReason')}），請改用單張 🤖 辨識")
-        return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", [])
-                       if not p.get("thought"))
-    last.raise_for_status()
+        return text
+    code, _, err = last
+    resp = requests.models.Response()
+    resp.status_code, resp._content = code, err.encode("utf-8")
+    raise requests.HTTPError(response=resp)
 
 
 def _call_claude(cfg, parts):
@@ -285,6 +337,10 @@ def _error_text(e):
         if code >= 500:
             return "🌐 AI 服務暫時忙碌或故障，請稍後再試。"
         return f"API 錯誤 {code}：{body[:200]}"
+    if isinstance(e, requests.ConnectTimeout):
+        return "🌐 連不上 Google AI 伺服器（連線逾時），請稍後再試。"
+    if isinstance(e, (requests.ReadTimeout, TimeoutError)):
+        return "⏱️ AI 回應太慢逾時。請按側邊欄「🩺 測試 AI 連線」看卡在哪裡。"
     if isinstance(e, requests.Timeout):
         return "🌐 連線逾時，可能是網路不穩，請再按一次。"
     if isinstance(e, requests.ConnectionError):
@@ -346,6 +402,43 @@ def recognize_one(cfg, file_obj, checks_db, current_category=None):
     """單張辨識：使用者手動指定這張是白板，用較高解析度"""
     return _recognize_batch(cfg, [file_obj], checks_db, current_category,
                             SINGLE_IMG_SIDE, True)[0]
+
+
+def diagnose(cfg, checks_db, file_obj=None):
+    """
+    🩺 測試 AI 連線：一步一步測，回傳每一步的結果，用來找出慢在哪裡
+    1. 純文字小請求：測 API Key、網路、模型名稱
+    2. 一張照片完整辨識（有上傳照片才測）：測實際辨識速度
+    """
+    steps = []
+
+    def run(name, fn):
+        stats, t0 = {}, time.time()
+        try:
+            out = fn(stats)
+            stats.setdefault("secs", round(time.time() - t0, 1))
+            steps.append({"step": name, "ok": True, "result": str(out)[:200], **stats})
+            return True
+        except Exception as e:
+            stats.setdefault("secs", round(time.time() - t0, 1))
+            steps.append({"step": name, "ok": False, **stats, "error": _error_text(e)})
+            return False
+
+    if cfg["provider"] == "gemini":
+        ok = run("1. 文字測試（API Key／網路／模型）",
+                 lambda st_: _call_gemini(cfg, [("text", '只回傳 JSON：{"ok": true}')], st_))
+    else:
+        ok = run("1. 文字測試（API Key／網路／模型）",
+                 lambda st_: _call_claude(cfg, [("text", '只回傳 JSON：{"ok": true}')]))
+    if ok and file_obj is not None:
+        def one(st_):
+            img = prepare_image_b64(file_obj, SINGLE_IMG_SIDE)
+            parts = [("text", build_prompt(checks_db, 1, None, True)), ("text", "照片1："), ("image", img)]
+            if cfg["provider"] == "gemini":
+                return _call_gemini(cfg, parts, st_)
+            return _call_claude(cfg, parts)
+        run("2. 一張白板完整辨識", one)
+    return steps
 
 
 def parse_board_date(s):
