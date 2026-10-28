@@ -17,10 +17,13 @@ import zipfile
 import pandas as pd
 import smtplib
 import re
+import json
+from urllib.parse import unquote
+import streamlit.components.v1 as components
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-from whiteboard_ai import get_ai_config, recognize_many, parse_board_date
+from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date
 
 # ==========================================
 # 0. 雲端資料庫設定
@@ -293,21 +296,75 @@ def init_group_photos(g_idx):
     if f"photos_{g_idx}" not in st.session_state:
         st.session_state[f"photos_{g_idx}"] = []
 
+def get_photo_time(file_obj):
+    """
+    取得拍照時間，回傳 (時間, 同一天內的序號, 來源說明)
+    1. 照片 EXIF 拍攝時間（手機原圖、相機）
+    2. 檔名裡的時間，例如 IMG_20261014_153012.jpg、PXL_20261014_073012345.jpg
+    3. LINE 相簿下載的檔名 ..._261014_11.jpg（日期＋相簿順序；LINE 會刪掉 EXIF）
+    都沒有就回傳 (None, 0, "")，維持上傳順序
+    """
+    try:
+        img = Image.open(io.BytesIO(file_obj.getvalue()))
+        exif = img.getexif()
+        raw = exif.get_ifd(0x8769).get(36867) or exif.get(306)  # DateTimeOriginal / DateTime
+        if raw:
+            return datetime.datetime.strptime(str(raw).strip()[:19], "%Y:%m:%d %H:%M:%S"), 0, "EXIF"
+    except Exception:
+        pass
+    name = os.path.basename(getattr(file_obj, "name", "") or "")
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})[_\-T ]?(\d{2})(\d{2})(\d{2})", name)
+    if m:
+        try:
+            return datetime.datetime(*map(int, m.groups())), 0, "檔名"
+        except ValueError:
+            pass
+    m = re.search(r"_(\d{2})(\d{2})(\d{2})_(\d+)\.\w+$", name)
+    if m:
+        try:
+            yy, mm, dd, seq = map(int, m.groups())
+            return datetime.datetime(2000 + yy, mm, dd), seq, "LINE"
+        except ValueError:
+            pass
+    return None, 0, ""
+
+def _time_sort_key(p):
+    ts = p.get('ts')
+    return (ts is None, ts or datetime.datetime.max, p.get('seq', 0), p.get('up_idx', 0))
+
+def sort_photos_by_time(g_idx):
+    lst = st.session_state.get(f"photos_{g_idx}", [])
+    lst.sort(key=_time_sort_key)
+    st.session_state[f"manual_order_{g_idx}"] = False
+
 def add_new_photos(g_idx, uploaded_files):
     init_group_photos(g_idx)
     current_list = st.session_state[f"photos_{g_idx}"]
     existing_ids = {p['id'] for p in current_list}
-    
+    st.session_state['_up_counter'] = st.session_state.get('_up_counter', 0)
+
+    new_items = []
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
-            current_list.append({
+            ts, seq, src = get_photo_time(f)
+            st.session_state['_up_counter'] += 1
+            new_items.append({
                 "id": file_id, "file": f, "thumb": make_thumb(f),
+                "ts": ts, "seq": seq, "ts_src": src, "up_idx": st.session_state['_up_counter'],
                 "desc": "", "design": "", "result": "", "selected_opt_index": 0
             })
             existing_ids.add(file_id)
 
+    if st.session_state.get(f"manual_order_{g_idx}"):
+        # 已經手動排過：不打亂原本的順序，新照片自己排好接在後面
+        current_list.extend(sorted(new_items, key=_time_sort_key))
+    else:
+        current_list.extend(new_items)
+        current_list.sort(key=_time_sort_key)
+
 def move_photo(g_idx, index, direction):
+    st.session_state[f"manual_order_{g_idx}"] = True
     lst = st.session_state[f"photos_{g_idx}"]
     new_index = index + direction
     if 0 <= new_index < len(lst):
@@ -452,10 +509,14 @@ def run_ai_on_group(g_idx, only_index=None):
     current_type = st.session_state.get(f"type_{g_idx}")
     msgs = []
 
-    with st.spinner(f"🤖 AI 正在辨識 {len(targets)} 張白板照片..."):
-        results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type)
+    if only_index is None:
+        with st.spinner(f"🤖 AI 正在從 {len(targets)} 張照片中找出白板並辨識..."):
+            results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type)
+    else:
+        with st.spinner("🤖 AI 正在辨識這張白板..."):
+            results = [recognize_one(AI_CFG, photos[only_index]['file'], db, current_type)]
 
-    valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board", True)]
+    valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board")]
 
     # 1) 決定工項分類：整組辨識時用多數決；單張辨識不動分類
     final_type = current_type
@@ -475,15 +536,14 @@ def run_ai_on_group(g_idx, only_index=None):
                 msgs.append(("info", f"工項已自動切換為：{best}"))
 
     # 2) 每張照片填入 說明/設計/實測
+    errors = []
     for i, r in zip(targets, results):
         p = photos[i]
         if not r.get("ok"):
-            p['ai'] = {"error": r.get("error", "未知錯誤")}
-            msgs.append(("error", f"No.{i+1:02d} 辨識失敗：{r.get('error','')}"))
+            errors.append((i, r.get("error", "未知錯誤")))
             continue
-        if not r.get("has_board", True):
-            p['ai'] = {"error": "照片中沒有找到白板"}
-            continue
+        if not r.get("has_board"):
+            continue  # 一般檢查照片：完全不動，保留原本手動填的內容
         for field in ("desc", "design", "result"):
             val = str(r.get(field) or "").strip()
             p[field] = val
@@ -514,8 +574,20 @@ def run_ai_on_group(g_idx, only_index=None):
                 msgs.append(("info", f"已帶入 位置：{loc or '(未讀到)'}　日期：{d or '(未讀到)'}"))
                 break
 
-    ok_n = sum(1 for _, r in zip(targets, results) if r.get("ok") and r.get("has_board", True))
-    msgs.insert(0, ("success", f"✅ AI 辨識完成 {ok_n}/{len(targets)} 張，請逐張確認內容"))
+    for err in dict.fromkeys(e for _, e in errors):  # 同一批失敗只顯示一次
+        nos = "、".join(f"No.{i+1:02d}" for i, e in errors if e == err)
+        msgs.append(("error", f"{nos} 辨識失敗：{err}"))
+
+    board_nos = "、".join(f"No.{i+1:02d}" for i, _ in valid)
+    if only_index is not None:
+        if valid: msgs.insert(0, ("success", "✅ 已重新辨識這張白板，請確認內容"))
+        elif not errors: msgs.insert(0, ("warning", "這張照片讀不到白板內容，請手動填寫"))
+    elif valid:
+        other = len(targets) - len(valid) - len(errors)
+        msgs.insert(0, ("success", f"✅ 找到 {len(valid)} 張白板（{board_nos}）已自動填入；"
+                                   f"其他 {other} 張檢查照片未更動，請用下拉選單填寫"))
+    elif not errors:
+        msgs.insert(0, ("warning", "這組照片裡沒有找到白板。若某張其實是白板，可按該張旁邊的 🤖 強制辨識"))
     st.session_state[f"ai_msg_{g_idx}"] = msgs
 
 def restore_ai_result(g_idx, i):
@@ -535,6 +607,57 @@ def clear_all_data():
     st.session_state['num_groups'] = 1
     st.session_state['merged_doc_buffer'] = None
     st.session_state['merged_filename'] = ""
+
+# ==========================================
+# ★ 記住常用設定：存在「各自手機/電腦的瀏覽器」，不同人互不影響
+# ==========================================
+PREFS_COOKIE = "sia_prefs"
+PREF_DEFAULTS = {
+    "p_name": "衛生福利部防疫中心興建工程",
+    "p_cont": "豐譽營造股份有限公司",
+    "sub_select": COMMON_SUB_CONTRACTORS[0],
+    "p_sub_custom": "川峻工程有限公司",
+    "recipient": list(RECIPIENTS.keys())[0],
+    "ai_fill_meta": True,
+}
+
+def load_prefs_once():
+    if st.session_state.get('_prefs_loaded'): return
+    st.session_state['_prefs_loaded'] = True
+    saved = {}
+    try:
+        raw = st.context.cookies.get(PREFS_COOKIE)
+        if raw: saved = json.loads(unquote(raw))
+    except Exception:
+        saved = {}
+    effective = {}
+    for k, default in PREF_DEFAULTS.items():
+        v = saved.get(k, default)
+        if k == "sub_select" and v not in COMMON_SUB_CONTRACTORS: v = default
+        if k == "recipient" and v not in RECIPIENTS: v = default
+        effective[k] = v
+        if k not in st.session_state: st.session_state[k] = v
+    st.session_state['_prefs_saved'] = effective
+
+def ensure_pref(k):
+    """有些欄位不一定每次都顯示（例如「自行輸入」廠商），被 Streamlit 清掉時從已存設定補回"""
+    if k not in st.session_state:
+        st.session_state[k] = st.session_state.get('_prefs_saved', {}).get(k, PREF_DEFAULTS[k])
+
+def save_prefs_if_changed():
+    prev = st.session_state.get('_prefs_saved', {})
+    current = {k: st.session_state.get(k, prev.get(k)) for k in PREF_DEFAULTS}
+    if current == st.session_state.get('_prefs_saved'): return
+    st.session_state['_prefs_saved'] = current
+    value = json.dumps(json.dumps(current, ensure_ascii=False))
+    components.html(f"""<script>
+      (function() {{
+        var c = "{PREFS_COOKIE}=" + encodeURIComponent({value}) + "; max-age=31536000; path=/; SameSite=Lax";
+        try {{ window.parent.document.cookie = c; }} catch (e) {{ document.cookie = c; }}
+      }})();
+    </script>""", height=0)
+
+load_prefs_once()
 
 # Sidebar
 with st.sidebar:
@@ -566,17 +689,20 @@ with st.sidebar:
     st.header("🤖 AI 白板辨識")
     if AI_CFG:
         st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
-        st.checkbox("辨識時一併帶入「施作位置」與「日期」", value=True, key="ai_fill_meta")
+        ensure_pref("ai_fill_meta")
+        st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
     else:
         st.info("尚未設定 API Key，請在 Secrets 加入 [ai] 區段")
 
     st.markdown("---")
     st.header("2. 專案資訊")
-    p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
-    p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
-    sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS)
+    st.caption("💾 工程名稱、廠商、收件人會記在這台裝置的瀏覽器，每個人各自記錄")
+    p_name = st.text_input("工程名稱", key="p_name")
+    p_cont = st.text_input("施工廠商", key="p_cont")
+    sub_select = st.selectbox("協力廠商", COMMON_SUB_CONTRACTORS, key="sub_select")
     if sub_select == "自行輸入...":
-        p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
+        ensure_pref("p_sub_custom")
+        p_sub = st.text_input("請輸入廠商名稱", key="p_sub_custom")
     else:
         p_sub = sub_select
     if "p_loc" not in st.session_state: st.session_state["p_loc"] = "北棟 1F"
@@ -634,6 +760,7 @@ if st.session_state['saved_template']:
             st.rerun()
         
         if st.session_state.get(f"photos_{g}"):
+            st.button("🕒 依拍照時間重新排序", key=f"tsort_{g}", on_click=sort_photos_by_time, args=(g,))
             if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
                 current_list = st.session_state[f"photos_{g}"]
                 for p in current_list:
@@ -646,13 +773,15 @@ if st.session_state['saved_template']:
                     s_key = f"sel_{g}_{p['id']}"
                     if s_key in st.session_state: p['selected_opt_index'] = st.session_state[s_key]
                 st.session_state[f"photos_{g}"].reverse()
+                st.session_state[f"manual_order_{g}"] = True
                 st.rerun()
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
 
         if photo_list and AI_CFG:
-            st.button(f"🤖 AI 辨識白板，自動填入本組 {len(photo_list)} 張", key=f"ai_all_{g}",
+            st.button(f"🤖 AI 找出白板並自動填入（本組 {len(photo_list)} 張只算 1 次辨識）" if len(photo_list) <= 8
+                      else f"🤖 AI 找出白板並自動填入（本組 {len(photo_list)} 張）", key=f"ai_all_{g}",
                       on_click=run_ai_on_group, args=(g,), type="primary", use_container_width=True)
         for level, text in st.session_state.pop(f"ai_msg_{g}", []):
             getattr(st, level)(text)
@@ -668,7 +797,14 @@ if st.session_state['saved_template']:
                     with col_img:
                         if 'thumb' not in photo_data: photo_data['thumb'] = make_thumb(photo_data['file'])
                         st.image(photo_data['thumb'] or photo_data['file'], use_container_width=True)
-                        st.caption(f"No. {i+1:02d}")
+                        ts = photo_data.get('ts')
+                        if ts and photo_data.get('ts_src') == "LINE":
+                            ts_txt = f"　🕒 {ts:%m/%d} 第{photo_data.get('seq', 0)}張"
+                        elif ts:
+                            ts_txt = f"　🕒 {ts:%m/%d %H:%M}"
+                        else:
+                            ts_txt = "　🕒 無時間資訊"
+                        st.caption(f"No. {i+1:02d}{ts_txt}")
                         ai = photo_data.get('ai')
                         if ai:
                             if ai.get('error'):
@@ -729,7 +865,7 @@ if st.session_state['saved_template']:
                         if st.button("⬇️", key=f"down_{g}_{i}"): move_photo(g, i, 1); st.rerun()
                         if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
                         if AI_CFG:
-                            st.button("🤖", key=f"ai_one_{g}_{i}", help="只重新辨識這一張",
+                            st.button("🤖", key=f"ai_one_{g}_{i}", help="把這張當白板辨識（AI 沒認出白板、或讀錯時用）",
                                       on_click=run_ai_on_group, args=(g, i))
                     st.divider()
 
@@ -764,7 +900,8 @@ if st.session_state['saved_template']:
     if not final_file_name_input.endswith(".docx"): final_file_name = final_file_name_input + ".docx"
     else: final_file_name = final_file_name_input
 
-    selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()))
+    ensure_pref("recipient")
+    selected_name = st.selectbox("📬 收件人", list(RECIPIENTS.keys()), key="recipient")
     target_email = RECIPIENTS[selected_name]
 
     if st.button("步驟 1：生成報告資料 (單一 Word 檔)", type="primary", use_container_width=True):
@@ -803,3 +940,5 @@ if st.session_state['saved_template']:
             st.download_button(label="📥 下載 Word 檔案", data=st.session_state['merged_doc_buffer'], file_name=st.session_state['merged_filename'], mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
 else:
     st.info("👈 請先在左側確認 Word 樣板")
+
+save_prefs_if_changed()
