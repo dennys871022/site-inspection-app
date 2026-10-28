@@ -23,7 +23,7 @@ import streamlit.components.v1 as components
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date
+from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date, diagnose
 
 # ==========================================
 # 0. 雲端資料庫設定
@@ -693,6 +693,24 @@ with st.sidebar:
         st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
         ensure_pref("ai_fill_meta")
         st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
+        if st.button("🩺 測試 AI 連線", use_container_width=True,
+                     help="一步步測試 API Key、網路與辨識速度；第 1 組有照片的話會拿第 1 張來測"):
+            first = (st.session_state.get("photos_0") or [None])[0]
+            with st.spinner("測試中（最多約 2 分鐘）..."):
+                st.session_state["ai_diag"] = diagnose(
+                    AI_CFG, st.session_state['checks_db'], first['file'] if first else None)
+        for d in st.session_state.get("ai_diag", []):
+            if d.get("ok"):
+                extra = []
+                if d.get("model_version"): extra.append(f"模型 {d['model_version']}")
+                if d.get("first_chunk") is not None: extra.append(f"首字 {d['first_chunk']} 秒")
+                if d.get("thoughts_tokens"): extra.append(f"思考 {d['thoughts_tokens']} tokens")
+                st.success(f"{d['step']}：{d.get('secs')} 秒" + ("｜" + "｜".join(extra) if extra else ""))
+            else:
+                st.error(f"{d['step']}：{d.get('secs')} 秒後失敗\n\n{d.get('error')}")
+        if st.session_state.get("ai_diag"):
+            with st.expander("詳細資料（可複製給 Claude 看）"):
+                st.code(json.dumps(st.session_state["ai_diag"], ensure_ascii=False, indent=1), language="json")
     else:
         st.info("尚未設定 API Key，請在 Secrets 加入 [ai] 區段")
 
