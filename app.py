@@ -332,10 +332,46 @@ def _time_sort_key(p):
     ts = p.get('ts')
     return (ts is None, ts or datetime.datetime.max, p.get('seq', 0), p.get('up_idx', 0))
 
+# 「說明/設計/實測」分兩種跟法：
+#   鎖定（預設）：文字固定在第幾格，上下移動只換照片 → 用來把照片對到 AI 排好的檢查項目
+#   不鎖定：文字跟著照片一起移動（舊的行為）
+SLOT_TEXT = ("desc", "design", "result")
+
+def _get_slot(g_idx, p):
+    v = {f: st.session_state.get(f"{f}_{g_idx}_{p['id']}", p.get(f, "")) for f in SLOT_TEXT}
+    v['opt'] = st.session_state.get(f"sel_{g_idx}_{p['id']}", p.get('selected_opt_index', 0))
+    v['tag'] = p.get('slot_tag')
+    v['ai_vals'] = p.get('slot_ai')
+    return v
+
+def _set_slot(g_idx, p, v):
+    for f in SLOT_TEXT:
+        p[f] = v.get(f, "")
+        st.session_state[f"{f}_{g_idx}_{p['id']}"] = p[f]
+    p['selected_opt_index'] = v.get('opt', 0) or 0
+    st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)  # 下拉選單依新的 index 重建
+    p['slot_tag'] = v.get('tag')
+    p['slot_ai'] = v.get('ai_vals')
+
+def slots_locked(g_idx):
+    return st.session_state.get(f"lock_slots_{g_idx}", True)
+
+def reorder_photos(g_idx, new_list, manual=True):
+    lst = st.session_state.get(f"photos_{g_idx}", [])
+    snapshot = [_get_slot(g_idx, p) for p in lst] if slots_locked(g_idx) else None
+    lst[:] = new_list
+    if snapshot is not None:
+        for pos, p in enumerate(lst):
+            _set_slot(g_idx, p, snapshot[pos])
+    st.session_state[f"manual_order_{g_idx}"] = manual
+
 def sort_photos_by_time(g_idx):
     lst = st.session_state.get(f"photos_{g_idx}", [])
-    lst.sort(key=_time_sort_key)
-    st.session_state[f"manual_order_{g_idx}"] = False
+    reorder_photos(g_idx, sorted(lst, key=_time_sort_key), manual=False)
+
+def reverse_photos(g_idx):
+    lst = st.session_state.get(f"photos_{g_idx}", [])
+    reorder_photos(g_idx, list(reversed(lst)))
 
 def add_new_photos(g_idx, uploaded_files):
     init_group_photos(g_idx)
@@ -364,11 +400,12 @@ def add_new_photos(g_idx, uploaded_files):
         current_list.sort(key=_time_sort_key)
 
 def move_photo(g_idx, index, direction):
-    st.session_state[f"manual_order_{g_idx}"] = True
     lst = st.session_state[f"photos_{g_idx}"]
     new_index = index + direction
     if 0 <= new_index < len(lst):
-        lst[index], lst[new_index] = lst[new_index], lst[index]
+        new = list(lst)
+        new[index], new[new_index] = new[new_index], new[index]
+        reorder_photos(g_idx, new)
 
 def delete_photo(g_idx, index):
     lst = st.session_state[f"photos_{g_idx}"]
@@ -475,6 +512,7 @@ def update_group_info(g_idx):
         if f"photos_{idx}" in st.session_state:
             for p in st.session_state[f"photos_{idx}"]:
                 p['desc'] = ""; p['design'] = ""; p['result'] = ""; p['selected_opt_index'] = 0
+                p['slot_tag'] = None; p['slot_ai'] = None
 
     clear_group_data(g_idx)
     
@@ -519,49 +557,63 @@ def run_ai_on_group(g_idx, only_index=None):
 
     valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board")]
 
-    # 1) 決定工項分類：整組辨識時用多數決；單張辨識不動分類
+    # 1) 決定工項分類（整組辨識用多數決；單張辨識不動分類）＋自檢項目名稱
     final_type = current_type
-    if only_index is None:
+    if only_index is None and valid:
         votes = {}
         for _, r in valid:
             if r.get("category"): votes[r["category"]] = votes.get(r["category"], 0) + 1
         if votes:
             best = max(votes, key=votes.get)
             if best != current_type:
-                final_type = best
-                st.session_state[f"type_{g_idx}"] = best
-                base_date = st.session_state.get('global_date', get_taiwan_date())
-                item_name, _ = generate_names(best, base_date)
-                spacer = "\u3000" * 3
-                st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{g_idx + 1}"
                 msgs.append(("info", f"工項已自動切換為：{best}"))
+            final_type = best
+            st.session_state[f"type_{g_idx}"] = best
+            base_date = st.session_state.get('global_date', get_taiwan_date())
+            item_name, _ = generate_names(best, base_date)
+            seq_digits = re.sub(r"\D", "", str((valid[0][1].get("board") or {}).get("seq") or ""))
+            spacer = "\u3000" * 3
+            st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{seq_digits or g_idx + 1}"
 
-    # 2) 每張照片填入 說明/設計/實測
+    # 2) 白板照片標記＋把讀到的檢查項目依序排進各格
     errors = []
     for i, r in zip(targets, results):
         p = photos[i]
         if not r.get("ok"):
             errors.append((i, r.get("error", "未知錯誤")))
             continue
+        p['is_board'] = bool(r.get("has_board"))
         if not r.get("has_board"):
-            continue  # 一般檢查照片：完全不動，保留原本手動填的內容
-        for field in ("desc", "design", "result"):
-            val = str(r.get(field) or "").strip()
-            p[field] = val
-            st.session_state[f"{field}_{g_idx}_{p['id']}"] = val
-        if r.get("category") == final_type and r.get("item_index") is not None:
-            p['selected_opt_index'] = r["item_index"] + 1
-        else:
-            p['selected_opt_index'] = 0
-        st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)  # 讓下拉選單依新的 index 重建
+            p.pop('ai', None)
+            continue
         p['ai'] = {
-            "vals": {f: p[f] for f in ("desc", "design", "result")},
-            "opt": p['selected_opt_index'],
             "confidence": r.get("confidence", 0),
             "notes": r.get("notes", ""),
             "board": r.get("board", {}),
+            "n_items": len(r.get("items") or []),
             "off_category": bool(r.get("category")) and r.get("category") != final_type,
         }
+
+    board_pos = [i for i, p in enumerate(photos) if p.get('is_board')]
+    include_board = st.session_state.get("ai_board_first_item", True)
+    for b, r in valid:
+        items = r.get("items") or []
+        nxt = [x for x in board_pos if x > b]
+        end = nxt[0] if nxt else len(photos)
+        start = b if include_board else b + 1
+        slots = list(range(start, end))
+        for k, (slot, it) in enumerate(zip(slots, items)):
+            opt = it["item_index"] + 1 if (r.get("category") == final_type and it.get("item_index") is not None) else 0
+            vals = {"desc": it["desc"], "design": it["design"], "result": it["result"], "opt": opt}
+            vals["tag"] = f"白板 No.{b+1:02d} 的第 {k+1}/{len(items)} 項"
+            vals["ai_vals"] = {f: vals[f] for f in ("desc", "design", "result", "opt")}
+            _set_slot(g_idx, photos[slot], vals)
+        if len(items) > len(slots):
+            left = "、".join(it["desc"] or "(未命名)" for it in items[len(slots):])
+            msgs.append(("warning", f"白板 No.{b+1:02d} 還有 {len(items) - len(slots)} 項沒有照片可放：{left}"
+                                    "（請多上傳照片，或用下拉選單手動填）"))
+        elif 0 < len(items) < len(slots):
+            msgs.append(("info", f"白板 No.{b+1:02d} 讀到 {len(items)} 項，後面 {len(slots) - len(items)} 張照片保持原樣"))
 
     # 3) 位置／日期帶入側邊欄（取第一張有讀到的）
     if st.session_state.get("ai_fill_meta", True):
@@ -586,21 +638,18 @@ def run_ai_on_group(g_idx, only_index=None):
         elif not errors: msgs.insert(0, ("warning", "這張照片讀不到白板內容，請手動填寫"))
     elif valid:
         other = len(targets) - len(valid) - len(errors)
-        msgs.insert(0, ("success", f"✅ 找到 {len(valid)} 張白板（{board_nos}）已自動填入；"
-                                   f"其他 {other} 張檢查照片未更動，請用下拉選單填寫（耗時 {secs:.0f} 秒）"))
+        n_items = sum(len(r.get("items") or []) for _, r in valid)
+        msgs.insert(0, ("success", f"✅ 找到 {len(valid)} 張白板（{board_nos}），讀到 {n_items} 個檢查項目，"
+                                   f"已依序排在照片旁（耗時 {secs:.0f} 秒）。照片對不上的話，用 ⬆️⬇️ 移動照片即可，項目會留在原位"))
     elif not errors:
         msgs.insert(0, ("warning", "這組照片裡沒有找到白板。若某張其實是白板，可按該張旁邊的 🤖 強制辨識"))
     st.session_state[f"ai_msg_{g_idx}"] = msgs
 
 def restore_ai_result(g_idx, i):
     p = st.session_state[f"photos_{g_idx}"][i]
-    ai = p.get('ai') or {}
-    if not ai.get('vals'): return
-    for f, v in ai['vals'].items():
-        p[f] = v
-        st.session_state[f"{f}_{g_idx}_{p['id']}"] = v
-    p['selected_opt_index'] = ai.get('opt', 0)
-    st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)
+    ai_vals = p.get('slot_ai')
+    if not ai_vals: return
+    _set_slot(g_idx, p, {**ai_vals, "tag": p.get('slot_tag'), "ai_vals": ai_vals})
 
 def clear_all_data():
     for key in list(st.session_state.keys()):
@@ -621,6 +670,7 @@ PREF_DEFAULTS = {
     "p_sub_custom": "川峻工程有限公司",
     "recipient": list(RECIPIENTS.keys())[0],
     "ai_fill_meta": True,
+    "ai_board_first_item": True,
     "ai_model": (AI_CFG or {}).get("model", ""),
 }
 
@@ -701,6 +751,9 @@ with st.sidebar:
         st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
         ensure_pref("ai_fill_meta")
         st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
+        ensure_pref("ai_board_first_item")
+        st.checkbox("白板那張照片也填第 1 個檢查項目", key="ai_board_first_item",
+                    help="關掉的話，第 1 個項目會從白板的下一張照片開始填")
         if AI_CFG["provider"] == "gemini":
             model_opts = list(dict.fromkeys(GEMINI_MODEL_CHOICES + [st.session_state["ai_model"]]))
             st.selectbox("AI 模型", model_opts, key="ai_model",
@@ -801,21 +854,13 @@ if st.session_state['saved_template']:
             st.rerun()
         
         if st.session_state.get(f"photos_{g}"):
-            st.button("🕒 依拍照時間重新排序", key=f"tsort_{g}", on_click=sort_photos_by_time, args=(g,))
-            if st.button("🔄 順序反了嗎？點我「一鍵反轉」照片順序", key=f"rev_{g}"):
-                current_list = st.session_state[f"photos_{g}"]
-                for p in current_list:
-                    d_key = f"desc_{g}_{p['id']}"
-                    if d_key in st.session_state: p['desc'] = st.session_state[d_key]
-                    des_key = f"design_{g}_{p['id']}"
-                    if des_key in st.session_state: p['design'] = st.session_state[des_key]
-                    r_key = f"result_{g}_{p['id']}"
-                    if r_key in st.session_state: p['result'] = st.session_state[r_key]
-                    s_key = f"sel_{g}_{p['id']}"
-                    if s_key in st.session_state: p['selected_opt_index'] = st.session_state[s_key]
-                st.session_state[f"photos_{g}"].reverse()
-                st.session_state[f"manual_order_{g}"] = True
-                st.rerun()
+            if f"lock_slots_{g}" not in st.session_state: st.session_state[f"lock_slots_{g}"] = True
+            st.toggle("📌 說明固定在位置上，⬆️⬇️ 只移動照片（關掉＝說明跟著照片走）", key=f"lock_slots_{g}")
+            b1, b2 = st.columns(2)
+            b1.button("🕒 依拍照時間重新排序", key=f"tsort_{g}", on_click=sort_photos_by_time, args=(g,),
+                      use_container_width=True)
+            b2.button("🔄 一鍵反轉照片順序", key=f"rev_{g}", on_click=reverse_photos, args=(g,),
+                      use_container_width=True)
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
@@ -856,6 +901,7 @@ if st.session_state['saved_template']:
                                 st.caption(f"{tag} AI 信心 {conf:.0%}" + (f"｜{ai['notes']}" if ai.get('notes') else ""))
                                 if ai.get('off_category'):
                                     st.caption("⚠️ 這張白板的工項跟本組不同，可能要移到別組")
+                                st.caption(f"📋 這是白板，讀到 {ai.get('n_items', 0)} 個檢查項目")
                                 b = ai.get('board') or {}
                                 labels = [("location", "位置"), ("date", "日期"), ("inspection_item", "項目"),
                                           ("seq", "編號"), ("design_values", "設計"), ("measured_values", "實測")]
@@ -863,9 +909,13 @@ if st.session_state['saved_template']:
                                 if lines:
                                     with st.expander("🔍 AI 讀到的白板"):
                                         st.text("\n".join(lines))
-                                st.button("↩️ 還原 AI 結果", key=f"ai_undo_{g}_{i}",
-                                          on_click=restore_ai_result, args=(g, i))
                     with col_info:
+                        if photo_data.get('slot_tag'):
+                            t1, t2 = st.columns([3, 1])
+                            t1.markdown(f"**📋 {photo_data['slot_tag']}**")
+                            if photo_data.get('slot_ai'):
+                                t2.button("↩️ 還原 AI", key=f"ai_undo_{g}_{i}", on_click=restore_ai_result,
+                                          args=(g, i), help="把這格改回 AI 讀到的內容")
                         def on_select_change(pk=pid, gk=g):
                             k = f"sel_{gk}_{pk}"
                             if k not in st.session_state: return
@@ -902,8 +952,8 @@ if st.session_state['saved_template']:
                         st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
 
                     with col_ctrl:
-                        if st.button("⬆️", key=f"up_{g}_{i}"): move_photo(g, i, -1); st.rerun()
-                        if st.button("⬇️", key=f"down_{g}_{i}"): move_photo(g, i, 1); st.rerun()
+                        st.button("⬆️", key=f"up_{g}_{i}", on_click=move_photo, args=(g, i, -1))
+                        st.button("⬇️", key=f"down_{g}_{i}", on_click=move_photo, args=(g, i, 1))
                         if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
                         if AI_CFG:
                             st.button("🤖", key=f"ai_one_{g}_{i}", help="把這張當白板辨識（AI 沒認出白板、或讀錯時用）",
