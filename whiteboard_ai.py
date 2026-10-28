@@ -182,20 +182,28 @@ def _call_gemini(cfg, parts):
         {"text": v} if kind == "text" else {"inline_data": {"mime_type": "image/jpeg", "data": v}}
         for kind, v in parts
     ]
-    base_cfg = {"temperature": 0, "responseMimeType": "application/json"}
+    # 注意：不要把 temperature 調低。Gemini 3 系列官方建議維持預設 1.0，
+    # 調低容易讓輸出無限重複，一直寫到上限才停 → 就是「跑很久最後逾時」的元兇。
+    # maxOutputTokens 再加一道保險：就算模型鬼打牆，也會很快停下來。
+    base_cfg = {"responseMimeType": "application/json", "maxOutputTokens": 8192}
     options = ([_gemini_thinking_ok[cfg["model"]]] if cfg["model"] in _gemini_thinking_ok
                else _GEMINI_THINKING_OPTIONS)
     last = None
     for opt in options:
         body = {"contents": [{"parts": g_parts}], "generationConfig": {**base_cfg, **opt}}
-        r = _post_with_retry(url, params={"key": cfg["api_key"]}, json=body, timeout=120)
+        r = _post_with_retry(url, params={"key": cfg["api_key"]}, json=body, timeout=(10, 90))
         last = r
         if r.status_code == 400 and opt:
             continue  # 這個模型不吃這種 thinking 參數，換下一種
         r.raise_for_status()
         _gemini_thinking_ok[cfg["model"]] = opt
         data = r.json()
-        return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]
+        cand = (data.get("candidates") or [{}])[0]
+        if cand.get("finishReason") == "MAX_TOKENS":
+            raise ValueError("AI 回覆異常（輸出過長被截斷），請再按一次")
+        if cand.get("finishReason") in ("SAFETY", "RECITATION", "PROHIBITED_CONTENT"):
+            raise ValueError(f"AI 拒絕回覆（{cand.get('finishReason')}），請改用單張 🤖 辨識")
+        return "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", [])
                        if not p.get("thought"))
     last.raise_for_status()
 
@@ -219,7 +227,7 @@ def _call_claude(cfg, parts):
             "temperature": 0,
             "messages": [{"role": "user", "content": c_parts}],
         },
-        timeout=120,
+        timeout=(10, 90),
     )
     r.raise_for_status()
     data = r.json()
@@ -281,7 +289,9 @@ def _error_text(e):
         return "🌐 連線逾時，可能是網路不穩，請再按一次。"
     if isinstance(e, requests.ConnectionError):
         return "🌐 連不到 AI 服務，請檢查網路後再試。"
-    return f"辨識結果解析失敗：{e}"
+    if isinstance(e, json.JSONDecodeError):
+        return "AI 回傳格式錯誤，請再按一次"
+    return str(e)
 
 
 def _recognize_batch(cfg, file_objs, checks_db, current_category, img_side, force_board):
