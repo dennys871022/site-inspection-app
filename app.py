@@ -160,12 +160,14 @@ def generate_single_page(template_bytes, context, photo_batch, start_no):
             spacer = "\u3000" * 4 
             
             info_text = f"照片編號：{data['no']:02d}{spacer}日期：{data['date_str']}\n"
-            info_text += f"說明：{data['desc']}\n"
-            
+            info_text += f"說明：{data['desc']}"
+
             if data.get('design') and data['design'].strip():
-                info_text += f"設計：{data['design']}\n"
-                
-            info_text += f"實測：{data['result']}"
+                info_text += f"\n設計：{data['design']}"
+
+            # 白板那張只有說明，設計、實測都空的話就不印「實測：」空行
+            if (data.get('result') or "").strip() or (data.get('design') or "").strip():
+                info_text += f"\n實測：{data['result']}"
             
             replace_text_content(doc, {info_key: info_text})
         else:
@@ -596,13 +598,19 @@ def run_ai_on_group(g_idx, only_index=None):
 
     board_pos = [i for i, p in enumerate(photos) if p.get('is_board')]
     filled = set()
-    include_board = st.session_state.get("ai_board_first_item", True)
+    group_title = re.sub(r"(\u3000|\s)*#\d+$", "", st.session_state.get(f"item_{g_idx}", "")).strip()
     for b, r in valid:
         items = r.get("items") or []
         nxt = [x for x in board_pos if x > b]
         end = nxt[0] if nxt else len(photos)
-        start = b if include_board else b + 1
-        slots = list(range(start, end))
+        # 白板那張：說明只寫檢查項目名稱，不選下拉、不填設計實測
+        title = group_title or str((r.get("board") or {}).get("inspection_item") or "").strip()
+        board_vals = {"desc": title, "design": "", "result": "", "opt": 0, "tag": "白板（說明＝檢查項目）"}
+        board_vals["ai_vals"] = {f: board_vals[f] for f in ("desc", "design", "result", "opt")}
+        _set_slot(g_idx, photos[b], board_vals)
+        filled.add(b)
+        # 檢查項目從白板的下一張開始排
+        slots = list(range(b + 1, end))
         for k, (slot, it) in enumerate(zip(slots, items)):
             opt = it["item_index"] + 1 if (r.get("category") == final_type and it.get("item_index") is not None) else 0
             vals = {"desc": it["desc"], "design": it["design"], "result": it["result"], "opt": opt}
@@ -681,7 +689,6 @@ PREF_DEFAULTS = {
     "p_sub_custom": "川峻工程有限公司",
     "recipient": list(RECIPIENTS.keys())[0],
     "ai_fill_meta": True,
-    "ai_board_first_item": True,
     "ai_model": (AI_CFG or {}).get("model", ""),
 }
 
@@ -762,9 +769,6 @@ with st.sidebar:
         st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
         ensure_pref("ai_fill_meta")
         st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
-        ensure_pref("ai_board_first_item")
-        st.checkbox("白板那張照片也填第 1 個檢查項目", key="ai_board_first_item",
-                    help="關掉的話，第 1 個項目會從白板的下一張照片開始填")
         if AI_CFG["provider"] == "gemini":
             model_opts = list(dict.fromkeys(GEMINI_MODEL_CHOICES + [st.session_state["ai_model"]]))
             st.selectbox("AI 模型", model_opts, key="ai_model",
