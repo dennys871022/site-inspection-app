@@ -100,12 +100,14 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
 
 【對應資料庫】
 - category_code：從下列 [C數字] 選最符合「抽查項目」的一個；都不符合就給 ""。
-- item_code：在該分類底下選最符合這張白板檢查內容的 [C數字-數字]；都不符合就給 ""。
-- desc / design / result：最後要寫進報告的文字。
-  * 有對應到 item 時，desc 用資料庫的「說明」原文；design、result 依資料庫的「格式」，
+- items：把白板上「每一個檢查項目」依白板由上到下的順序列出來，一項一筆。
+  * 以資料庫的「說明」為單位：白板上的內容若對應到資料庫裡不同的說明（例如「開挖高程」與「超挖」
+    各有一個說明），就拆成兩筆；若資料庫只有一個說明涵蓋兩個數值，就合成一筆。
+  * item_code：該分類底下最符合的 [C數字-數字]；都不符合就給 ""。
+  * desc / design / result：最後要寫進報告的文字。
+    有對應到 item 時，desc 用資料庫的「說明」原文；design、result 依資料庫的「格式」，
     把白板上的數值填進去（格式是空的就直接寫白板上的值）。
-  * 沒對應到 item 時，用白板內容自己寫簡短的 desc / design / result。
-  * result 若白板有多個實測值（例如高程與超挖量），用「、」串在一起。
+    沒對應到 item 時，用白板內容自己寫簡短的 desc / design / result。
 
 【資料庫】
 {db_listing}
@@ -121,8 +123,10 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
         "project": "", "location": "", "date": "", "inspection_item": "", "seq": "",
         "design_values": "", "measured_values": "", "signers": ""
       }},
-      "category_code": "", "item_code": "",
-      "desc": "", "design": "", "result": "",
+      "category_code": "",
+      "items": [
+        {{"item_code": "", "desc": "", "design": "", "result": ""}}
+      ],
       "confidence": 0.0,
       "notes": ""
     }},
@@ -303,25 +307,38 @@ def _parse_json(text):
 
 
 def _resolve_codes(result, checks_db):
-    """把 C3 / C3-5 轉回真正的分類名稱與項目索引"""
+    """
+    把 C3 / C3-5 轉回真正的分類名稱與項目索引。
+    result["items"] 每一筆會加上 item_index（0-based，對不到就是 None）。
+    """
     cats = list(checks_db.keys())
     result["category"] = None
-    result["item_index"] = None  # 0-based
 
     m = re.match(r"C(\d+)", str(result.get("category_code", "")).strip(), re.I)
     if m and 1 <= int(m.group(1)) <= len(cats):
         result["category"] = cats[int(m.group(1)) - 1]
 
-    m = re.match(r"C(\d+)-(\d+)", str(result.get("item_code", "")).strip(), re.I)
-    if m:
-        ci, ii = int(m.group(1)), int(m.group(2))
-        if 1 <= ci <= len(cats):
-            items = checks_db[cats[ci - 1]]
-            if 1 <= ii <= len(items):
+    items = result.get("items")
+    if not isinstance(items, list) or not items:
+        # 相容舊格式：只有一組 desc/design/result
+        items = [{k: result.get(k, "") for k in ("item_code", "desc", "design", "result")}]
+    clean = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        it = {k: str(it.get(k) or "").strip() for k in ("item_code", "desc", "design", "result")}
+        it["item_index"] = None
+        m = re.match(r"C(\d+)-(\d+)", it["item_code"], re.I)
+        if m:
+            ci, ii = int(m.group(1)), int(m.group(2))
+            if 1 <= ci <= len(cats) and 1 <= ii <= len(checks_db[cats[ci - 1]]):
                 if result["category"] is None:
                     result["category"] = cats[ci - 1]
                 if result["category"] == cats[ci - 1]:
-                    result["item_index"] = ii - 1
+                    it["item_index"] = ii - 1
+        if it["desc"] or it["design"] or it["result"]:
+            clean.append(it)
+    result["items"] = clean
     return result
 
 
