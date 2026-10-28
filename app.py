@@ -20,6 +20,7 @@ import re
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
+from whiteboard_ai import get_ai_config, recognize_many, parse_board_date
 
 # ==========================================
 # 0. 雲端資料庫設定
@@ -274,6 +275,20 @@ def fetch_google_sheets_db(csv_url):
         return False, f"讀取失敗：{str(e)}"
 
 # --- 狀態管理函式 ---
+def make_thumb(file_obj, max_side=480):
+    """手機原圖動輒 3~5MB，每次重新整理都顯示原圖會很慢，改顯示小圖"""
+    try:
+        from PIL import ImageOps
+        img = Image.open(io.BytesIO(file_obj.getvalue()))
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB": img = img.convert("RGB")
+        img.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=70)
+        return buf.getvalue()
+    except Exception:
+        return None
+
 def init_group_photos(g_idx):
     if f"photos_{g_idx}" not in st.session_state:
         st.session_state[f"photos_{g_idx}"] = []
@@ -287,7 +302,8 @@ def add_new_photos(g_idx, uploaded_files):
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
             current_list.append({
-                "id": file_id, "file": f, "desc": "", "design": "", "result": "", "selected_opt_index": 0 
+                "id": file_id, "file": f, "thumb": make_thumb(f),
+                "desc": "", "design": "", "result": "", "selected_opt_index": 0
             })
             existing_ids.add(file_id)
 
@@ -413,9 +429,108 @@ def update_group_info(g_idx):
             st.session_state[f"item_{other_g}"] = f"{item_name}{spacer}#{other_g + 1}"
             clear_group_data(other_g)
 
+# ==========================================
+# ★ AI 白板辨識：讀白板 → 對應工項/說明 → 自動填入
+# ==========================================
+AI_CFG = get_ai_config(st.secrets) if hasattr(st, "secrets") else None
+
+def _sync_photo_fields_from_widgets(g_idx):
+    """把畫面上已手動改過的文字先存回 photo dict，避免被覆蓋時遺失"""
+    for p in st.session_state.get(f"photos_{g_idx}", []):
+        for field in ("desc", "design", "result"):
+            k = f"{field}_{g_idx}_{p['id']}"
+            if k in st.session_state: p[field] = st.session_state[k]
+
+def run_ai_on_group(g_idx, only_index=None):
+    if not AI_CFG: return
+    photos = st.session_state.get(f"photos_{g_idx}", [])
+    if not photos: return
+    _sync_photo_fields_from_widgets(g_idx)
+
+    targets = list(range(len(photos))) if only_index is None else [only_index]
+    db = st.session_state['checks_db']
+    current_type = st.session_state.get(f"type_{g_idx}")
+    msgs = []
+
+    with st.spinner(f"🤖 AI 正在辨識 {len(targets)} 張白板照片..."):
+        results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type)
+
+    valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board", True)]
+
+    # 1) 決定工項分類：整組辨識時用多數決；單張辨識不動分類
+    final_type = current_type
+    if only_index is None:
+        votes = {}
+        for _, r in valid:
+            if r.get("category"): votes[r["category"]] = votes.get(r["category"], 0) + 1
+        if votes:
+            best = max(votes, key=votes.get)
+            if best != current_type:
+                final_type = best
+                st.session_state[f"type_{g_idx}"] = best
+                base_date = st.session_state.get('global_date', get_taiwan_date())
+                item_name, _ = generate_names(best, base_date)
+                spacer = "\u3000" * 3
+                st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{g_idx + 1}"
+                msgs.append(("info", f"工項已自動切換為：{best}"))
+
+    # 2) 每張照片填入 說明/設計/實測
+    for i, r in zip(targets, results):
+        p = photos[i]
+        if not r.get("ok"):
+            p['ai'] = {"error": r.get("error", "未知錯誤")}
+            msgs.append(("error", f"No.{i+1:02d} 辨識失敗：{r.get('error','')}"))
+            continue
+        if not r.get("has_board", True):
+            p['ai'] = {"error": "照片中沒有找到白板"}
+            continue
+        for field in ("desc", "design", "result"):
+            val = str(r.get(field) or "").strip()
+            p[field] = val
+            st.session_state[f"{field}_{g_idx}_{p['id']}"] = val
+        if r.get("category") == final_type and r.get("item_index") is not None:
+            p['selected_opt_index'] = r["item_index"] + 1
+        else:
+            p['selected_opt_index'] = 0
+        st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)  # 讓下拉選單依新的 index 重建
+        p['ai'] = {
+            "vals": {f: p[f] for f in ("desc", "design", "result")},
+            "opt": p['selected_opt_index'],
+            "confidence": r.get("confidence", 0),
+            "notes": r.get("notes", ""),
+            "board": r.get("board", {}),
+            "off_category": bool(r.get("category")) and r.get("category") != final_type,
+        }
+
+    # 3) 位置／日期帶入側邊欄（取第一張有讀到的）
+    if st.session_state.get("ai_fill_meta", True):
+        for _, r in valid:
+            b = r.get("board") or {}
+            loc = str(b.get("location") or "").strip()
+            d = parse_board_date(b.get("date"))
+            if loc: st.session_state["p_loc"] = loc
+            if d: st.session_state["global_date"] = d
+            if loc or d:
+                msgs.append(("info", f"已帶入 位置：{loc or '(未讀到)'}　日期：{d or '(未讀到)'}"))
+                break
+
+    ok_n = sum(1 for _, r in zip(targets, results) if r.get("ok") and r.get("has_board", True))
+    msgs.insert(0, ("success", f"✅ AI 辨識完成 {ok_n}/{len(targets)} 張，請逐張確認內容"))
+    st.session_state[f"ai_msg_{g_idx}"] = msgs
+
+def restore_ai_result(g_idx, i):
+    p = st.session_state[f"photos_{g_idx}"][i]
+    ai = p.get('ai') or {}
+    if not ai.get('vals'): return
+    for f, v in ai['vals'].items():
+        p[f] = v
+        st.session_state[f"{f}_{g_idx}_{p['id']}"] = v
+    p['selected_opt_index'] = ai.get('opt', 0)
+    st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)
+
 def clear_all_data():
     for key in list(st.session_state.keys()):
-        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'design_', 'result_')):
+        if key.startswith(('type_', 'item_', 'fname_', 'photos_', 'file_', 'sel_', 'desc_', 'design_', 'result_', 'ai_msg_')):
             del st.session_state[key]
     st.session_state['num_groups'] = 1
     st.session_state['merged_doc_buffer'] = None
@@ -448,6 +563,14 @@ with st.sidebar:
     st.button("🗑️ 清除所有填寫資料", on_click=clear_all_data, use_container_width=True)
 
     st.markdown("---")
+    st.header("🤖 AI 白板辨識")
+    if AI_CFG:
+        st.success(f"✅ 已啟用（{AI_CFG['provider']} / {AI_CFG['model']}）")
+        st.checkbox("辨識時一併帶入「施作位置」與「日期」", value=True, key="ai_fill_meta")
+    else:
+        st.info("尚未設定 API Key，請在 Secrets 加入 [ai] 區段")
+
+    st.markdown("---")
     st.header("2. 專案資訊")
     p_name = st.text_input("工程名稱", "衛生福利部防疫中心興建工程")
     p_cont = st.text_input("施工廠商", "豐譽營造股份有限公司")
@@ -456,8 +579,10 @@ with st.sidebar:
         p_sub = st.text_input("請輸入廠商名稱", "川峻工程有限公司")
     else:
         p_sub = sub_select
-    p_loc = st.text_input("施作位置", "北棟 1F")
-    base_date = st.date_input("日期", get_taiwan_date(), key='global_date')
+    if "p_loc" not in st.session_state: st.session_state["p_loc"] = "北棟 1F"
+    if "global_date" not in st.session_state: st.session_state["global_date"] = get_taiwan_date()
+    p_loc = st.text_input("施作位置", key="p_loc")
+    base_date = st.date_input("日期", key='global_date')
 
 # Main Body
 if st.session_state['saved_template']:
@@ -525,6 +650,12 @@ if st.session_state['saved_template']:
         
         init_group_photos(g)
         photo_list = st.session_state[f"photos_{g}"]
+
+        if photo_list and AI_CFG:
+            st.button(f"🤖 AI 辨識白板，自動填入本組 {len(photo_list)} 張", key=f"ai_all_{g}",
+                      on_click=run_ai_on_group, args=(g,), type="primary", use_container_width=True)
+        for level, text in st.session_state.pop(f"ai_msg_{g}", []):
+            getattr(st, level)(text)
         
         if photo_list:
             check_items_list = st.session_state['checks_db'].get(selected_type, [])
@@ -535,8 +666,28 @@ if st.session_state['saved_template']:
                     col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
                     pid = photo_data['id']
                     with col_img:
-                        st.image(photo_data['file'], use_container_width=True)
+                        if 'thumb' not in photo_data: photo_data['thumb'] = make_thumb(photo_data['file'])
+                        st.image(photo_data['thumb'] or photo_data['file'], use_container_width=True)
                         st.caption(f"No. {i+1:02d}")
+                        ai = photo_data.get('ai')
+                        if ai:
+                            if ai.get('error'):
+                                st.warning(f"🤖 {ai['error']}")
+                            else:
+                                conf = float(ai.get('confidence') or 0)
+                                tag = "🟢" if conf >= 0.8 else ("🟡" if conf >= 0.5 else "🔴")
+                                st.caption(f"{tag} AI 信心 {conf:.0%}" + (f"｜{ai['notes']}" if ai.get('notes') else ""))
+                                if ai.get('off_category'):
+                                    st.caption("⚠️ 這張白板的工項跟本組不同，可能要移到別組")
+                                b = ai.get('board') or {}
+                                labels = [("location", "位置"), ("date", "日期"), ("inspection_item", "項目"),
+                                          ("seq", "編號"), ("design_values", "設計"), ("measured_values", "實測")]
+                                lines = [f"{lb}：{b.get(k)}" for k, lb in labels if b.get(k)]
+                                if lines:
+                                    with st.expander("🔍 AI 讀到的白板"):
+                                        st.text("\n".join(lines))
+                                st.button("↩️ 還原 AI 結果", key=f"ai_undo_{g}_{i}",
+                                          on_click=restore_ai_result, args=(g, i))
                     with col_info:
                         def on_select_change(pk=pid, gk=g):
                             k = f"sel_{gk}_{pk}"
@@ -577,6 +728,9 @@ if st.session_state['saved_template']:
                         if st.button("⬆️", key=f"up_{g}_{i}"): move_photo(g, i, -1); st.rerun()
                         if st.button("⬇️", key=f"down_{g}_{i}"): move_photo(g, i, 1); st.rerun()
                         if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
+                        if AI_CFG:
+                            st.button("🤖", key=f"ai_one_{g}_{i}", help="只重新辨識這一張",
+                                      on_click=run_ai_on_group, args=(g, i))
                     st.divider()
 
             g_photos_export = []
