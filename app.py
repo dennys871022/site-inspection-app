@@ -565,6 +565,10 @@ def run_ai_on_group(g_idx, only_index=None):
         votes = {}
         for _, r in valid:
             if r.get("category"): votes[r["category"]] = votes.get(r["category"], 0) + 1
+        first = valid[0][1]
+        seq_digits = re.sub(r"\D", "", str((first.get("board") or {}).get("seq") or ""))
+        spacer = "\u3000" * 3
+        item_name = ""
         if votes:
             best = max(votes, key=votes.get)
             if best != current_type:
@@ -573,8 +577,15 @@ def run_ai_on_group(g_idx, only_index=None):
             st.session_state[f"type_{g_idx}"] = best
             base_date = st.session_state.get('global_date', get_taiwan_date())
             item_name, _ = generate_names(best, base_date)
-            seq_digits = re.sub(r"\D", "", str((valid[0][1].get("board") or {}).get("seq") or ""))
-            spacer = "\u3000" * 3
+        else:
+            # 資料庫沒有這個工項：選單沒辦法選，但項目名稱照白板改
+            item_name = str(first.get("title") or "").strip() or \
+                        str((first.get("board") or {}).get("inspection_item") or "").strip()
+            if item_name:
+                msgs.append(("warning", f"資料庫（Google Sheet）沒有對應「{item_name}」的工項，"
+                                        "上方工項選單維持原樣，項目名稱與檔名已依白板填入。"
+                                        "建議把這個工項加進 Sheet，之後就能自動選。"))
+        if item_name:
             st.session_state[f"item_{g_idx}"] = f"{item_name}{spacer}#{seq_digits or g_idx + 1}"
 
     # 2) 白板照片標記＋把讀到的檢查項目依序排進各格
@@ -997,7 +1008,11 @@ if st.session_state['saved_template']:
     st.markdown("---")
     st.subheader("🚀 執行操作")
     default_filename = ""
-    if "type_0" in st.session_state:
+    item0_base = re.sub(r"(\u3000|\s)*#\d+$", "", st.session_state.get("item_0", "")).strip()
+    if item0_base:
+        # 檔名跟著「自檢項目名稱」走（AI 依白板改了名稱，檔名也會跟著變）
+        default_filename = f"{base_date.year - 1911}{base_date.month:02d}{base_date.day:02d}{item0_base}"
+    elif "type_0" in st.session_state:
         default_filename = generate_clean_filename_base(st.session_state["type_0"], base_date)
     else:
         default_filename = f"自主檢查表_{get_taiwan_date()}"
