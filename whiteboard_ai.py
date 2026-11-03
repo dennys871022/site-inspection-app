@@ -23,7 +23,7 @@ import requests
 from PIL import Image, ImageOps
 
 DEFAULT_MODELS = {
-    "gemini": "gemini-flash-latest",
+    "gemini": "gemini-3.5-flash-lite",
     "claude": "claude-haiku-5-5",
 }
 
@@ -86,9 +86,13 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
 其中有些是「白板照」（拿著寫有工程名稱、抽查位置、日期、檢查項目、設計值/實測值的白板或夾板表格），
 其他是一般的「檢查照片」（量尺、儀器、現場施工狀況等，沒有白板，或白板很小看不清楚）。
 
-【第一步：判斷每張是不是白板照】
-- has_board = true：畫面主體是白板／表格，而且上面的字讀得出來。
-- has_board = false：其他所有照片。這類照片只要回 {{"photo": 編號, "has_board": false}}，不用填其他欄位。
+【第一步：判斷每張是不是白板特寫】
+工地習慣會特別拍一張「白板特寫」；其他檢查照片裡雖然也常有白板入鏡，但只是配角。
+- has_board = true：只有「白板特寫」才算——白板／表格是照片主角，佔畫面大部分（大約一半以上），
+  而且字清楚到能逐字讀出來。
+- has_board = false：其他所有照片，包括「白板有入鏡，但只佔畫面一小部分、放在旁邊、或字模糊」的
+  檢查照片——就算你讀得出部分字也一樣算 false。
+  這類照片只要回 {{"photo": 編號, "has_board": false}}，不用填其他欄位。
 {board_hint}
 【第二步：只針對白板照判讀】
 1. 只讀「這次寫上去」的字跡。擦不乾淨的淡色殘影、上次留下的模糊字一律忽略。
@@ -100,8 +104,9 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
 
 【對應資料庫】
 - category_code：從下列 [C數字] 選最符合「抽查項目」的一個；都不符合就給 ""。
-- title：這張白板的自主檢查名稱，統一寫成「工程名稱＋施工自主檢查」的格式，
-  例如白板寫「基地開挖及祛水工程施工查驗」或「…施工自檢」→ title 給「基地開挖及祛水工程施工自主檢查」。
+- title：只根據白板的「抽查/查驗項目」那一欄，整理成「…施工自主檢查」的寫法。
+  不要加上白板最上面的「工程名稱」（例如「衛生福利部防疫中心興建工程」）或機關、廠商名稱。
+  例如抽查項目寫「基地開挖及祛水工程施工查驗」或「…施工自檢」→ title 給「基地開挖及祛水工程施工自主檢查」。
   不管有沒有對應到資料庫都要給。
 - items：把白板上「每一個檢查項目」依白板由上到下的順序列出來，一項一筆。
   * 以資料庫的「說明」為單位：白板上的內容若對應到資料庫裡不同的說明（例如「開挖高程」與「超挖」
@@ -197,14 +202,14 @@ def _gemini_stream(cfg, g_parts, gen_cfg, stats=None, deadline=150):
     retries = []  # 記錄被 Google 擋下重試的狀況（429 次數上限／503 伺服器忙碌）
     for attempt in range(4):
         r = requests.post(url, params={"key": cfg["api_key"], "alt": "sse"}, json=body,
-                          stream=True, timeout=(15, 60))
+                          stream=True, timeout=(10, 40))
         if stats is not None:
             stats["retries"] = retries
         if r.status_code == 200:
             break
         txt = r.text
-        if r.status_code in (429, 500, 502, 503) and attempt < 3 and not _is_daily_quota(txt):
-            wait = min(float(r.headers.get("retry-after", 0) or 0) or 2 ** attempt * 2, 20)
+        if r.status_code in (500, 502, 503) and attempt < 1:
+            wait = 2
             retries.append(f"{r.status_code}（等 {wait:.0f} 秒）")
             time.sleep(wait)
             continue
@@ -273,6 +278,74 @@ def _call_gemini(cfg, parts, stats=None):
     resp = requests.models.Response()
     resp.status_code, resp._content = code, err.encode("utf-8")
     raise requests.HTTPError(response=resp)
+
+
+# 額度用完／太慢的模型先暫停一段時間（同一個 API Key 的所有使用者共用）
+_model_block = {}
+
+
+def _secs_to_pacific_midnight():
+    """Google 每日額度在美國太平洋時間午夜重置"""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+        nxt = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+        return max(60, (nxt - now).total_seconds())
+    except Exception:
+        return 6 * 3600
+
+
+def _switch_reason(e):
+    """這個錯誤要不要換模型？要的話回傳 (暫停秒數, 原因)"""
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        code, body = e.response.status_code, e.response.text or ""
+        if code == 429 and _is_daily_quota(body):
+            return _secs_to_pacific_midnight(), "今天額度用完"
+        if code == 429:
+            return 60, "每分鐘次數已滿"
+        if code == 404:
+            return 3600, "找不到這個模型"
+        if code >= 500:
+            return 60, "伺服器忙碌"
+        return None
+    if isinstance(e, (requests.ReadTimeout, TimeoutError)):
+        return 300, "回應太慢"
+    if isinstance(e, requests.ConnectionError):
+        return 30, "連線失敗"
+    return None
+
+
+def _short(m):
+    return m.replace("gemini-", "")
+
+
+def call_with_fallback(cfg, parts, stats=None):
+    """
+    依序嘗試模型：使用者選的 → 清單裡其他的。額度用完、太慢、找不到模型時自動換下一個。
+    回傳 (文字, 實際用的模型, 換模型的說明清單)
+    """
+    if cfg["provider"] != "gemini":
+        return _call_claude(cfg, parts), cfg["model"], []
+    order = [cfg["model"]] + [m for m in GEMINI_MODEL_CHOICES if m != cfg["model"]]
+    now = time.time()
+    ready = [m for m in order if _model_block.get(m, (0, ""))[0] <= now]
+    notes = [f"{_short(m)} {_model_block[m][1]}，暫停使用" for m in order if m not in ready]
+    if not ready:                      # 全部都在暫停中：還是全部再試一次
+        ready, notes = order, []
+    last = None
+    for m in ready:
+        try:
+            text = _call_gemini({**cfg, "model": m}, parts, stats)
+            _model_block.pop(m, None)
+            return text, m, notes
+        except Exception as e:
+            why = _switch_reason(e)
+            if not why:
+                raise
+            _model_block[m] = (time.time() + why[0], why[1])
+            notes.append(f"{_short(m)} {why[1]}")
+            last = e
+    raise last
 
 
 def _call_claude(cfg, parts):
@@ -386,8 +459,8 @@ def _recognize_batch(cfg, file_objs, checks_db, current_category, img_side, forc
         for i, f in enumerate(file_objs, start=1):
             parts.append(("text", f"照片{i}："))
             parts.append(("image", prepare_image_b64(f, img_side)))
-        call = _call_claude if cfg["provider"] == "claude" else _call_gemini
-        data = _parse_json(call(cfg, parts))
+        text, used, notes = call_with_fallback(cfg, parts)
+        data = _parse_json(text)
         items = data.get("photos", data) if isinstance(data, dict) else data
         if isinstance(items, dict):
             items = [items]
@@ -408,6 +481,8 @@ def _recognize_batch(cfg, file_objs, checks_db, current_category, img_side, forc
                 _resolve_codes(it, checks_db)
             it["ok"] = True
             out[idx] = it
+        for o in out:
+            o["model_used"], o["switch_notes"] = used, notes
         return out
     except Exception as e:
         err = _error_text(e)
@@ -432,12 +507,19 @@ def recognize_one(cfg, file_obj, checks_db, current_category=None):
                             SINGLE_IMG_SIDE, True)[0]
 
 
+# 順序＝額度用完時自動換的順序
 GEMINI_MODEL_CHOICES = [
-    "gemini-flash-latest",      # 最新 Flash（目前指向 3.8 Flash）
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
+    "gemini-flash-latest",      # 最新 Flash（目前指向 3.8 Flash），免費版常排隊很久，放最後
 ]
+GEMINI_MODEL_LABELS = {
+    "gemini-3.5-flash-lite": "3.5 Flash-Lite（最快・預設）",
+    "gemini-3.6-flash": "3.6 Flash（手寫效果好）",
+    "gemini-3.1-flash-lite": "3.1 Flash-Lite（備用）",
+    "gemini-flash-latest": "最新 Flash（手寫效果最好，但免費版可能很慢）",
+}
 
 
 def ping_models(cfg, models=GEMINI_MODEL_CHOICES):
