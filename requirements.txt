@@ -4,3 +4,4 @@ docxcompose
 pandas
 XlsxWriter
 setuptools<70.0.0
+pillow-heif
