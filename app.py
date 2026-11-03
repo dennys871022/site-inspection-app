@@ -9,6 +9,13 @@ from docx.shared import Cm, Pt
 from docx.oxml.ns import qn
 from docxcompose.composer import Composer
 from PIL import Image
+try:
+    # 讓 Pillow 讀得懂 iPhone / 三星的 HEIC 照片
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF_OK = True
+except Exception:
+    HEIF_OK = False
 import io
 import datetime
 from datetime import timedelta, timezone
@@ -294,6 +301,40 @@ def make_thumb(file_obj, max_side=480):
     except Exception:
         return None
 
+class PhotoFile(io.BytesIO):
+    """轉成標準 JPEG 後的照片（跟 Streamlit 的上傳檔用法一樣：.name / .size / .getvalue()）"""
+    def __init__(self, data, name):
+        super().__init__(data)
+        self.name = name
+        self.size = len(data)
+
+def normalize_photo(f, max_side=2400):
+    """
+    手機照片統一轉成 JPEG：
+    - HEIC/HEIF/WEBP 這些 Word 放不進去的格式 → 轉 JPEG
+    - 手機原圖太大（4000px 以上、5MB 以上）→ 縮到 2400px，後面產 Word、AI 辨識都比較快
+    - 已經是一般大小的 JPEG 就原封不動
+    回傳 (檔案物件, 錯誤訊息)
+    """
+    name = os.path.basename(getattr(f, "name", "photo.jpg"))
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    try:
+        from PIL import ImageOps
+        img = Image.open(io.BytesIO(f.getvalue()))
+        needs = ext not in ("jpg", "jpeg") or max(img.size) > max_side or f.size > 4 * 1024 * 1024
+        if not needs:
+            return f, None
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB": img = img.convert("RGB")
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        return PhotoFile(buf.getvalue(), name.rsplit(".", 1)[0] + ".jpg"), None
+    except Exception as e:
+        if ext in ("heic", "heif") and not HEIF_OK:
+            return None, f"{name}：伺服器缺少 HEIC 支援（requirements.txt 要加 pillow-heif）"
+        return None, f"{name}：無法讀取這張照片（{e}）"
+
 def init_group_photos(g_idx):
     if f"photos_{g_idx}" not in st.session_state:
         st.session_state[f"photos_{g_idx}"] = []
@@ -381,11 +422,15 @@ def add_new_photos(g_idx, uploaded_files):
     existing_ids = {p['id'] for p in current_list}
     st.session_state['_up_counter'] = st.session_state.get('_up_counter', 0)
 
-    new_items = []
+    new_items, bad = [], []
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
-            ts, seq, src = get_photo_time(f)
+            ts, seq, src = get_photo_time(f)   # 先從原檔讀拍照時間（轉檔前）
+            f, err = normalize_photo(f)
+            if err:
+                bad.append(err)
+                continue
             st.session_state['_up_counter'] += 1
             new_items.append({
                 "id": file_id, "file": f, "thumb": make_thumb(f),
@@ -394,6 +439,8 @@ def add_new_photos(g_idx, uploaded_files):
             })
             existing_ids.add(file_id)
 
+    if bad:
+        st.session_state[f"upload_err_{g_idx}"] = bad
     if st.session_state.get(f"manual_order_{g_idx}"):
         # 已經手動排過：不打亂原本的順序，新照片自己排好接在後面
         current_list.extend(sorted(new_items, key=_time_sort_key))
@@ -456,6 +503,17 @@ DEFAULT_CHECKS_DB = {
 
 st.set_page_config(page_title="工程自主檢查表生成器", layout="wide")
 st.title("🏗️ 工程自主檢查表 (主控同步雲端版)")
+
+# LINE / FB / IG 等 App 內建瀏覽器常常沒辦法上傳照片，偵測到就提醒
+try:
+    _ua = (st.context.headers.get("User-Agent") or "")
+except Exception:
+    _ua = ""
+_inapp = next((n for k, n in (("Line/", "LINE"), ("FBAN", "Facebook"), ("FBAV", "Facebook"),
+                              ("Instagram", "Instagram"), ("MicroMessenger", "微信")) if k in _ua), None)
+if _inapp:
+    st.warning(f"📱 你現在是在 {_inapp} 的內建瀏覽器開啟，上傳照片常會失敗。"
+               "請點右上角「⋯」→「用預設瀏覽器開啟」（Chrome / Safari）再使用。")
 
 def load_latest_db():
     if GOOGLE_SHEETS_CSV_URL.strip():
@@ -581,6 +639,11 @@ def run_ai_on_group(g_idx, only_index=None):
             # 資料庫沒有這個工項：選單沒辦法選，但項目名稱照白板改
             item_name = str(first.get("title") or "").strip() or \
                         str((first.get("board") or {}).get("inspection_item") or "").strip()
+            # 保險：AI 若把白板最上面的「工程名稱」也加進來，把它去掉
+            for prefix in (str((first.get("board") or {}).get("project") or "").strip(),
+                           str(st.session_state.get("p_name") or "").strip()):
+                if prefix and item_name.startswith(prefix) and len(item_name) > len(prefix):
+                    item_name = item_name[len(prefix):].strip(" 　-_：:")
             if item_name:
                 msgs.append(("warning", f"資料庫（Google Sheet）沒有對應「{item_name}」的工項，"
                                         "上方工項選單維持原樣，項目名稱與檔名已依白板填入。"
@@ -873,7 +936,11 @@ if st.session_state['saved_template']:
         if uploader_key_name not in st.session_state: st.session_state[uploader_key_name] = 0
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
         
-        new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)", type=['jpg','png','jpeg'], accept_multiple_files=True, key=dynamic_key)
+        new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)",
+                                     type=['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'],
+                                     accept_multiple_files=True, key=dynamic_key)
+        for msg in st.session_state.pop(f"upload_err_{g}", []):
+            st.error(f"⚠️ 上傳失敗：{msg}")
         if new_files:
             add_new_photos(g, new_files)
             st.session_state[uploader_key_name] += 1
