@@ -2,3 +2,7 @@
 maxUploadSize = 1000
 maxMessageSize = 1000
 enableWebsocketCompression = true
+# 手機瀏覽器（尤其 iPhone Safari、App 內建瀏覽器）常擋掉防偽造用的 cookie，
+# 上傳時會被伺服器拒絕（403），看起來就像「按了上傳沒反應」→ 關掉這個檢查
+enableXsrfProtection = false
+enableCORS = false
