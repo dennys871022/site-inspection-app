@@ -27,6 +27,7 @@ import re
 import json
 from urllib.parse import unquote
 import streamlit.components.v1 as components
+from photo_picker import photo_picker, PICKER_OK
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -426,7 +427,11 @@ def add_new_photos(g_idx, uploaded_files):
     for f in uploaded_files:
         file_id = f"{f.name}_{f.size}"
         if file_id not in existing_ids:
-            ts, seq, src = get_photo_time(f)   # 先從原檔讀拍照時間（轉檔前）
+            # 拍照時間：先從原檔讀（轉檔前）；手機選照片元件已經在手機上讀好的就直接用
+            ts, seq, src = get_photo_time(f)
+            pre = getattr(f, "ts_info", None)
+            if pre and (ts is None or pre[2] == "EXIF"):
+                ts, seq, src = pre
             f, err = normalize_photo(f)
             if err:
                 bad.append(err)
@@ -936,9 +941,18 @@ if st.session_state['saved_template']:
         if uploader_key_name not in st.session_state: st.session_state[uploader_key_name] = 0
         dynamic_key = f"uploader_{g}_{st.session_state[uploader_key_name]}"
         
-        new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)",
-                                     type=['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'],
-                                     accept_multiple_files=True, key=dynamic_key)
+        # 手機友善上傳：照片在手機先縮小，斷線時自動重送（st.file_uploader 在手機上切到相簿會斷線失敗）
+        if PICKER_OK:
+            if photo_picker(key=f"picker_{g}", on_photos=lambda ph, gg=g: add_new_photos(gg, ph)):
+                st.rerun()
+            with st.expander("💻 電腦拖曳上傳（手機請用上面的按鈕）"):
+                new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)",
+                                             type=['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'],
+                                             accept_multiple_files=True, key=dynamic_key)
+        else:
+            new_files = st.file_uploader(f"點擊此處選擇照片 (第 {g+1} 組)",
+                                         type=['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'],
+                                         accept_multiple_files=True, key=dynamic_key)
         for msg in st.session_state.pop(f"upload_err_{g}", []):
             st.error(f"⚠️ 上傳失敗：{msg}")
         if new_files:
