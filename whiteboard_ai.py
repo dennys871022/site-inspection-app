@@ -27,9 +27,16 @@ DEFAULT_MODELS = {
     "claude": "claude-haiku-5-5",
 }
 
-BATCH_SIZE = 8          # 一次 API 呼叫最多放幾張
-BATCH_IMG_SIDE = 1024   # 整組送出時每張的解析度
-SINGLE_IMG_SIDE = 1280  # 單張重新辨識時用較高解析度
+BATCH_SIZE = 8          # 第一段「找白板」一次 API 呼叫最多放幾張
+DETECT_IMG_SIDE = 768   # 第一段只判斷是不是白板，小圖就夠
+SINGLE_IMG_SIDE = 2000  # 第二段逐張讀白板：高解析度，手寫小字才看得清楚
+DEFAULT_READ_MODEL = "gemini-3.6-flash"   # 讀白板（手寫）預設用手寫效果較好的模型
+
+# 工地白板常見用語：給 AI 辨認潦草手寫時參考（可自行增加）
+SITE_VOCAB = [
+    "行政棟", "實驗棟", "滯洪池A", "滯洪池B.C", "油槽", "line", "GL", "超挖", "高程",
+    "一階", "二階", "三階", "四階", "儀器高", "讀數", "設計", "實測", "開挖", "祛水", "基地",
+]
 
 
 # ------------------------------------------------------------------
@@ -95,12 +102,24 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
   這類照片只要回 {{"photo": 編號, "has_board": false}}，不用填其他欄位。
 {board_hint}
 【第二步：只針對白板照判讀】
+0. 先把白板上「所有手寫內容」逐字照抄到 raw_text（照原樣、照位置由上到下，看不清楚的字用 □），
+   抄完再根據 raw_text 填其他欄位。不要跳過這一步。
 1. 只讀「這次寫上去」的字跡。擦不乾淨的淡色殘影、上次留下的模糊字一律忽略。
 2. 印好的表格：打勾（✓、V、塗黑）的選項才算數，沒勾的列忽略；印好的空白欄位以手寫內容為準。
 3. 日期多為民國年（例如 115.10.14 = 2026-10-14），請轉成西元 YYYY-MM-DD。
 4. 抽查位置照實抄寫並整理成乾淨文字（例如「實驗棟 line 7-12/A-C」）。
 5. 數值保留白板上的單位與正負號（GL-2.225m、2.5cm），不要自己換算或四捨五入。
 6. 看不清楚的字不要猜，對應欄位留空字串，並在 notes 說明。
+
+【手寫判讀技巧】
+- 手寫數字常見混淆：1/7、4/9、5/6/S、0/6、2/Z、3/8、小數點與逗號、7 與 1 加一橫。
+  用「合理範圍」交叉判斷：開挖高程大多在 GL-0.5 ～ GL-20 m；超挖量通常 0 ～ 10 cm；
+  儀器高、讀數多為 GL+ 幾十～幾百 cm；同一張白板上的設計值、實測值、讀數應該彼此接近。
+- 「GL」手寫常看起來像「6L」「GI」「G2」，一律當作 GL；「cm」「m」「mm」常寫得很潦草，依數值大小判斷。
+- 中文手寫潦草時，優先對照下面的工地常用詞與資料庫用語來辨認，不要硬猜成無關的字：
+  {vocab}
+- 日期：{date_hint}
+- uncertain：把你沒把握的值列出來（例如 "實測 GL-2.27m 的 7 可能是 1"），沒有就給空陣列。
 
 【對應資料庫】
 - category_code：從下列 [C數字] 選最符合「抽查項目」的一個；都不符合就給 ""。
@@ -127,6 +146,7 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
     {{
       "photo": 1,
       "has_board": true,
+      "raw_text": "",
       "board": {{
         "project": "", "location": "", "date": "", "inspection_item": "", "seq": "",
         "design_values": "", "measured_values": "", "signers": ""
@@ -137,6 +157,7 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
         {{"item_code": "", "desc": "", "design": "", "result": ""}}
       ],
       "confidence": 0.0,
+      "uncertain": [],
       "notes": ""
     }},
     {{"photo": 2, "has_board": false}}
@@ -145,16 +166,31 @@ PROMPT_TEMPLATE = """你是台灣營造工地的品管助理。下面有 {n} 張
 """
 
 
-def build_prompt(checks_db, n, current_category=None, force_board=False):
+def build_prompt(checks_db, n, current_category=None, force_board=False, photo_dates=None):
     hint = ""
     if current_category:
         hint = f"（使用者目前選的分類是「{current_category}」，若白板內容相符請優先使用此分類。）\n"
     board_hint = ""
     if force_board:
         board_hint = "（使用者已確認這張是白板照，請直接當白板判讀，has_board 給 true。）\n"
+    dates = [d for d in (photo_dates or []) if d]
+    if dates:
+        date_hint = (f"這張照片的拍攝日期是 {dates[0]}（民國 {dates[0].year - 1911}.{dates[0].month}.{dates[0].day}），"
+                     "白板上的日期通常是同一天或前後幾天，讀不清楚時以此判斷。")
+    else:
+        date_hint = "白板日期多為民國年，例如 115.10.14。"
     return PROMPT_TEMPLATE.format(
-        n=n, db_listing=build_db_listing(checks_db), extra_hint=hint, board_hint=board_hint
+        n=n, db_listing=build_db_listing(checks_db), extra_hint=hint, board_hint=board_hint,
+        vocab="、".join(SITE_VOCAB), date_hint=date_hint,
     )
+
+
+DETECT_PROMPT = """下面有 {n} 張工地自主檢查照片，依序標為 照片1 ~ 照片{n}。
+工地習慣會特別拍一張「白板特寫」；其他檢查照片裡雖然也常有白板入鏡，但只是配角。
+請找出哪幾張是「白板特寫」：白板／表格是照片主角，佔畫面大部分（大約一半以上），而且字清楚可讀。
+白板只是入鏡、放在旁邊、佔畫面一小部分或字模糊的檢查照片，都不算。
+只回傳 JSON：{{"boards": [白板特寫的照片編號，例如 1, 4；沒有就給空陣列]}}
+"""
 
 
 # ------------------------------------------------------------------
@@ -168,6 +204,13 @@ _GEMINI_THINKING_OPTIONS = [
     {"thinkingConfig": {"thinkingBudget": 0}},                                 # Gemini 2.5 系列
     {"thinkingConfig": {"includeThoughts": True}},                             # 其他會思考的模型
     {},                                                                         # 都不支援就不帶
+]
+# 讀手寫時讓模型「稍微想一下」準確度較好；判斷是不是白板則越快越好
+_GEMINI_THINKING_LOW = [
+    {"thinkingConfig": {"thinkingLevel": "low", "includeThoughts": True}},     # Gemini 3 系列
+    {"thinkingConfig": {"thinkingBudget": 1024, "includeThoughts": True}},     # Gemini 2.5 系列
+    {"thinkingConfig": {"includeThoughts": True}},
+    {},
 ]
 _gemini_thinking_ok = {}
 
@@ -252,15 +295,16 @@ def _gemini_stream(cfg, g_parts, gen_cfg, stats=None, deadline=150):
     return 200, "".join(texts), ""
 
 
-def _call_gemini(cfg, parts, stats=None):
+def _call_gemini(cfg, parts, stats=None, think="minimal"):
     g_parts = [
         {"text": v} if kind == "text" else {"inline_data": {"mime_type": "image/jpeg", "data": v}}
         for kind, v in parts
     ]
     # 不要把 temperature 調低：Gemini 3 系列官方建議維持預設，調低容易讓輸出重複鬼打牆。
     base_cfg = {"responseMimeType": "application/json", "maxOutputTokens": 8192}
-    options = ([_gemini_thinking_ok[cfg["model"]]] if cfg["model"] in _gemini_thinking_ok
-               else _GEMINI_THINKING_OPTIONS)
+    ck = (cfg["model"], think)
+    options = ([_gemini_thinking_ok[ck]] if ck in _gemini_thinking_ok
+               else (_GEMINI_THINKING_LOW if think == "low" else _GEMINI_THINKING_OPTIONS))
     last = (0, "", "")
     for opt in options:
         st_ = {} if stats is None else stats
@@ -272,7 +316,7 @@ def _call_gemini(cfg, parts, stats=None):
             continue  # 這個模型不吃這種 thinking 參數，換下一種
         if code != 200:
             break
-        _gemini_thinking_ok[cfg["model"]] = opt
+        _gemini_thinking_ok[ck] = opt
         return text
     code, _, err = last
     resp = requests.models.Response()
@@ -319,7 +363,7 @@ def _short(m):
     return m.replace("gemini-", "")
 
 
-def call_with_fallback(cfg, parts, stats=None):
+def call_with_fallback(cfg, parts, stats=None, think="minimal"):
     """
     依序嘗試模型：使用者選的 → 清單裡其他的。額度用完、太慢、找不到模型時自動換下一個。
     回傳 (文字, 實際用的模型, 換模型的說明清單)
@@ -335,7 +379,7 @@ def call_with_fallback(cfg, parts, stats=None):
     last = None
     for m in ready:
         try:
-            text = _call_gemini({**cfg, "model": m}, parts, stats)
+            text = _call_gemini({**cfg, "model": m}, parts, stats, think)
             _model_block.pop(m, None)
             return text, m, notes
         except Exception as e:
@@ -451,63 +495,99 @@ def _error_text(e):
     return str(e)
 
 
-def _recognize_batch(cfg, file_objs, checks_db, current_category, img_side, force_board):
-    """一次 API 呼叫處理多張，回傳與輸入同順序的結果清單"""
-    n = len(file_objs)
+def _read_board(cfg, file_obj, checks_db, current_category, photo_date=None):
+    """第二段：單張白板高解析度判讀（用讀手寫的模型、讓模型多想一下）"""
     try:
-        parts = [("text", build_prompt(checks_db, n, current_category, force_board))]
-        for i, f in enumerate(file_objs, start=1):
-            parts.append(("text", f"照片{i}："))
-            parts.append(("image", prepare_image_b64(f, img_side)))
-        text, used, notes = call_with_fallback(cfg, parts)
+        parts = [("text", build_prompt(checks_db, 1, current_category, True, [photo_date])),
+                 ("text", "照片1："), ("image", prepare_image_b64(file_obj, SINGLE_IMG_SIDE))]
+        text, used, notes = call_with_fallback(cfg, parts, think="low")
         data = _parse_json(text)
         items = data.get("photos", data) if isinstance(data, dict) else data
         if isinstance(items, dict):
             items = [items]
-
-        out = [{"ok": True, "has_board": False} for _ in range(n)]
-        for pos, it in enumerate(items or []):
-            if not isinstance(it, dict):
-                continue
-            try:
-                idx = int(it.get("photo", pos + 1)) - 1
-            except (TypeError, ValueError):
-                idx = pos
-            if not 0 <= idx < n:
-                continue
-            it = dict(it)
-            it["has_board"] = bool(it.get("has_board", False))
-            if it["has_board"]:
-                _resolve_codes(it, checks_db)
-            it["ok"] = True
-            out[idx] = it
-        for o in out:
-            o["model_used"], o["switch_notes"] = used, notes
-        return out
+        it = dict((items or [{}])[0] or {})
+        it["has_board"] = True
+        _resolve_codes(it, checks_db)
+        it.update(ok=True, model_used=used, switch_notes=notes)
+        return it
     except Exception as e:
-        err = _error_text(e)
-        return [{"ok": False, "error": err} for _ in range(n)]
+        return {"ok": False, "error": _error_text(e)}
 
 
-def recognize_many(cfg, file_objs, checks_db, current_category=None):
-    """整組辨識：每 BATCH_SIZE 張打包成一次呼叫，多包平行送出"""
-    chunks = [file_objs[i:i + BATCH_SIZE] for i in range(0, len(file_objs), BATCH_SIZE)]
+def _detect_boards(cfg, file_objs):
+    """第一段：小圖＋快速模型，只找出哪幾張是白板特寫。回傳 (白板索引集合, 實際模型, 換模型說明)"""
+    parts = [("text", DETECT_PROMPT.format(n=len(file_objs)))]
+    for i, f in enumerate(file_objs, start=1):
+        parts.append(("text", f"照片{i}："))
+        parts.append(("image", prepare_image_b64(f, DETECT_IMG_SIDE)))
+    text, used, notes = call_with_fallback(cfg, parts)
+    data = _parse_json(text)
+    raw = data.get("boards", []) if isinstance(data, dict) else data
+    idx = set()
+    for b in raw or []:
+        try:
+            k = int(b) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= k < len(file_objs):
+            idx.add(k)
+    return idx, used, notes
+
+
+def _read_cfg(cfg, read_model):
+    if cfg["provider"] != "gemini":
+        return cfg
+    return {**cfg, "model": read_model or DEFAULT_READ_MODEL}
+
+
+def recognize_many(cfg, file_objs, checks_db, current_category=None, read_model=None, photo_dates=None):
+    """
+    整組辨識（兩段式）：
+      1. 找白板：每 BATCH_SIZE 張打包成一次呼叫、小圖、快速模型
+      2. 讀白板：只把白板特寫逐張送出，高解析度＋手寫效果好的模型，多張同時進行
+    回傳與輸入同順序的結果清單
+    """
+    n = len(file_objs)
+    photo_dates = list(photo_dates or [None] * n)
+    out = [None] * n
+    chunks = [list(range(i, min(i + BATCH_SIZE, n))) for i in range(0, n, BATCH_SIZE)]
+
+    def detect(chunk):
+        try:
+            idx, used, notes = _detect_boards(cfg, [file_objs[i] for i in chunk])
+            return chunk, {chunk[k] for k in idx}, used, notes, None
+        except Exception as e:
+            return chunk, set(), None, [], _error_text(e)
+
+    boards, det_notes = [], []
     with ThreadPoolExecutor(max_workers=max(1, min(4, len(chunks)))) as ex:
-        futures = [ex.submit(_recognize_batch, cfg, c, checks_db, current_category,
-                             BATCH_IMG_SIDE, False) for c in chunks]
-        results = []
-        for f in futures:
-            results.extend(f.result())
-    return results
+        for chunk, found, used, notes, err in ex.map(detect, chunks):
+            det_notes += notes
+            for i in chunk:
+                if err:
+                    out[i] = {"ok": False, "error": err}
+                elif i in found:
+                    boards.append(i)
+                else:
+                    out[i] = {"ok": True, "has_board": False, "model_used": used, "switch_notes": notes}
+
+    rcfg = _read_cfg(cfg, read_model)
+    if boards:
+        with ThreadPoolExecutor(max_workers=min(4, len(boards))) as ex:
+            res = ex.map(lambda i: _read_board(rcfg, file_objs[i], checks_db, current_category,
+                                               photo_dates[i]), boards)
+            for i, r in zip(boards, res):
+                if r.get("ok"):
+                    r["switch_notes"] = list(dict.fromkeys(det_notes + (r.get("switch_notes") or [])))
+                out[i] = r
+    return out
 
 
-def recognize_one(cfg, file_obj, checks_db, current_category=None):
-    """單張辨識：使用者手動指定這張是白板，用較高解析度"""
-    return _recognize_batch(cfg, [file_obj], checks_db, current_category,
-                            SINGLE_IMG_SIDE, True)[0]
+def recognize_one(cfg, file_obj, checks_db, current_category=None, read_model=None, photo_date=None):
+    """單張辨識：使用者手動指定這張是白板，直接進第二段"""
+    return _read_board(_read_cfg(cfg, read_model), file_obj, checks_db, current_category, photo_date)
 
 
-# 順序＝額度用完時自動換的順序
 GEMINI_MODEL_CHOICES = [
     "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
@@ -537,7 +617,7 @@ def ping_models(cfg, models=GEMINI_MODEL_CHOICES):
         return list(ex.map(one, models))
 
 
-def diagnose(cfg, checks_db, file_obj=None):
+def diagnose(cfg, checks_db, file_obj=None, read_model=None):
     """
     🩺 測試 AI 連線：一步一步測，回傳每一步的結果，用來找出慢在哪裡
     1. 純文字小請求：測 API Key、網路、模型名稱
@@ -568,9 +648,9 @@ def diagnose(cfg, checks_db, file_obj=None):
             img = prepare_image_b64(file_obj, SINGLE_IMG_SIDE)
             parts = [("text", build_prompt(checks_db, 1, None, True)), ("text", "照片1："), ("image", img)]
             if cfg["provider"] == "gemini":
-                return _call_gemini(cfg, parts, st_)
+                return _call_gemini(_read_cfg(cfg, read_model), parts, st_, "low")
             return _call_claude(cfg, parts)
-        run("2. 一張白板完整辨識", one)
+        run("2. 一張白板完整辨識（讀手寫模型）", one)
     return steps
 
 
