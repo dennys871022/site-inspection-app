@@ -31,7 +31,7 @@ from photo_picker import photo_picker, PICKER_OK
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date, diagnose, ping_models, GEMINI_MODEL_CHOICES, GEMINI_MODEL_LABELS
+from whiteboard_ai import get_ai_config, recognize_many, recognize_one, parse_board_date, diagnose, ping_models, GEMINI_MODEL_CHOICES, GEMINI_MODEL_LABELS, DEFAULT_READ_MODEL
 
 # ==========================================
 # 0. 雲端資料庫設定
@@ -613,12 +613,16 @@ def run_ai_on_group(g_idx, only_index=None):
     msgs = []
 
     t0 = datetime.datetime.now()
+    read_model = st.session_state.get("ai_read_model") or DEFAULT_READ_MODEL
+    dates = [(p['ts'].date() if p.get('ts') else None) for p in photos]
     if only_index is None:
-        with st.spinner(f"🤖 AI 正在從 {len(targets)} 張照片中找出白板並辨識..."):
-            results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type)
+        with st.spinner(f"🤖 AI 正在從 {len(targets)} 張照片中找出白板特寫，再逐張讀白板..."):
+            results = recognize_many(AI_CFG, [photos[i]['file'] for i in targets], db, current_type,
+                                     read_model=read_model, photo_dates=[dates[i] for i in targets])
     else:
-        with st.spinner("🤖 AI 正在辨識這張白板..."):
-            results = [recognize_one(AI_CFG, photos[only_index]['file'], db, current_type)]
+        with st.spinner("🤖 AI 正在仔細讀這張白板..."):
+            results = [recognize_one(AI_CFG, photos[only_index]['file'], db, current_type,
+                                     read_model=read_model, photo_date=dates[only_index])]
 
     valid = [(i, r) for i, r in zip(targets, results) if r.get("ok") and r.get("has_board")]
 
@@ -676,6 +680,9 @@ def run_ai_on_group(g_idx, only_index=None):
         p['ai'] = {
             "confidence": r.get("confidence", 0),
             "notes": r.get("notes", ""),
+            "uncertain": [str(u) for u in (r.get("uncertain") or []) if str(u).strip()],
+            "raw_text": str(r.get("raw_text") or ""),
+            "model_used": r.get("model_used", ""),
             "board": r.get("board", {}),
             "n_items": len(r.get("items") or []),
             "off_category": bool(r.get("category")) and r.get("category") != final_type,
@@ -775,6 +782,7 @@ PREF_DEFAULTS = {
     "recipient": list(RECIPIENTS.keys())[0],
     "ai_fill_meta": True,
     "ai_model_v2": (AI_CFG or {}).get("model", ""),
+    "ai_read_model": DEFAULT_READ_MODEL,
 }
 
 def load_prefs_once():
@@ -856,9 +864,15 @@ with st.sidebar:
         st.checkbox("辨識時一併帶入「施作位置」與「日期」", key="ai_fill_meta")
         if AI_CFG["provider"] == "gemini":
             model_opts = list(dict.fromkeys(GEMINI_MODEL_CHOICES + [st.session_state["ai_model_v2"]]))
-            st.selectbox("AI 模型", model_opts, key="ai_model_v2",
+            st.selectbox("找白板用的模型", model_opts, key="ai_model_v2",
                          format_func=lambda m: GEMINI_MODEL_LABELS.get(m, m),
-                         help="選擇會記在這台裝置。額度用完或太慢時，會自動依序換下一個模型")
+                         help="第一段：從整組照片找出哪幾張是白板特寫，用最快的就好。選擇會記在這台裝置")
+            ensure_pref("ai_read_model")
+            if st.session_state["ai_read_model"] not in GEMINI_MODEL_CHOICES:
+                st.session_state["ai_read_model"] = DEFAULT_READ_MODEL
+            st.selectbox("讀白板（手寫）用的模型", GEMINI_MODEL_CHOICES, key="ai_read_model",
+                         format_func=lambda m: GEMINI_MODEL_LABELS.get(m, m),
+                         help="第二段：逐張高解析度讀白板，建議用手寫效果好的。額度用完會自動換下一個")
             st.caption("額度用完會自動換：" + " → ".join(m.replace("gemini-", "") for m in
                        [st.session_state["ai_model_v2"]] + [x for x in GEMINI_MODEL_CHOICES
                                                              if x != st.session_state["ai_model_v2"]]))
@@ -876,7 +890,8 @@ with st.sidebar:
             first = (st.session_state.get("photos_0") or [None])[0]
             with st.spinner("測試中（最多約 2 分鐘）..."):
                 st.session_state["ai_diag"] = diagnose(
-                    AI_CFG, st.session_state['checks_db'], first['file'] if first else None)
+                    AI_CFG, st.session_state['checks_db'], first['file'] if first else None,
+                    read_model=st.session_state.get("ai_read_model"))
         for d in st.session_state.get("ai_diag", []):
             if d.get("ok"):
                 extra = []
@@ -1018,14 +1033,22 @@ if st.session_state['saved_template']:
                                 st.caption(f"{tag} AI 信心 {conf:.0%}" + (f"｜{ai['notes']}" if ai.get('notes') else ""))
                                 if ai.get('off_category'):
                                     st.caption("⚠️ 這張白板的工項跟本組不同，可能要移到別組")
+                                if ai.get('uncertain'):
+                                    st.warning("🧐 AI 沒把握，請對照照片確認：\n\n" +
+                                               "\n".join(f"- {u}" for u in ai['uncertain']))
                                 st.caption(f"📋 這是白板，讀到 {ai.get('n_items', 0)} 個檢查項目")
                                 b = ai.get('board') or {}
                                 labels = [("location", "位置"), ("date", "日期"), ("inspection_item", "項目"),
                                           ("seq", "編號"), ("design_values", "設計"), ("measured_values", "實測")]
                                 lines = [f"{lb}：{b.get(k)}" for k, lb in labels if b.get(k)]
-                                if lines:
+                                if lines or ai.get('raw_text'):
                                     with st.expander("🔍 AI 讀到的白板"):
-                                        st.text("\n".join(lines))
+                                        if lines: st.text("\n".join(lines))
+                                        if ai.get('raw_text'):
+                                            st.caption("白板手寫逐字抄錄（□＝看不清楚）：")
+                                            st.text(ai['raw_text'])
+                                        if ai.get('model_used'):
+                                            st.caption(f"判讀模型：{GEMINI_MODEL_LABELS.get(ai['model_used'], ai['model_used'])}")
                     with col_info:
                         if photo_data.get('slot_tag'):
                             t1, t2 = st.columns([3, 1])
