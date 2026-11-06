@@ -28,6 +28,7 @@ import json
 from urllib.parse import unquote
 import streamlit.components.v1 as components
 from photo_picker import photo_picker, PICKER_OK
+from report_preview import report_preview, preview_thumb, PREVIEW_OK
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -987,7 +988,8 @@ if st.session_state['saved_template']:
         
         if st.session_state.get(f"photos_{g}"):
             if f"lock_slots_{g}" not in st.session_state: st.session_state[f"lock_slots_{g}"] = True
-            st.toggle("📌 說明固定在位置上，⬆️⬇️ 只移動照片（關掉＝說明跟著照片走）", key=f"lock_slots_{g}")
+            st.toggle("📌 換位置時只換照片，說明留在原位（關掉＝照片和說明一起換）", key=f"lock_slots_{g}",
+                      help="預覽拖拉、⬆️⬇️、依時間排序、反轉都照這個設定")
             b1, b2 = st.columns(2)
             b1.button("🕒 依拍照時間重新排序", key=f"tsort_{g}", on_click=sort_photos_by_time, args=(g,),
                       use_container_width=True)
@@ -998,8 +1000,7 @@ if st.session_state['saved_template']:
         photo_list = st.session_state[f"photos_{g}"]
 
         if photo_list and AI_CFG:
-            st.button(f"🤖 AI 找出白板並自動填入（本組 {len(photo_list)} 張只算 1 次辨識）" if len(photo_list) <= 8
-                      else f"🤖 AI 找出白板並自動填入（本組 {len(photo_list)} 張）", key=f"ai_all_{g}",
+            st.button(f"🤖 AI 找出白板並自動填入（本組 {len(photo_list)} 張）", key=f"ai_all_{g}",
                       on_click=run_ai_on_group, args=(g,), type="primary", use_container_width=True)
         for level, text in st.session_state.pop(f"ai_msg_{g}", []):
             getattr(st, level)(text)
@@ -1008,97 +1009,123 @@ if st.session_state['saved_template']:
             check_items_list = st.session_state['checks_db'].get(selected_type, [])
             options = ["(請選擇...)"] + [item['desc'] for item in check_items_list]
 
-            for i, photo_data in enumerate(photo_list):
-                with st.container():
-                    col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
-                    pid = photo_data['id']
-                    with col_img:
-                        if 'thumb' not in photo_data: photo_data['thumb'] = make_thumb(photo_data['file'])
-                        st.image(photo_data['thumb'] or photo_data['file'], use_container_width=True)
-                        ts = photo_data.get('ts')
-                        if ts and photo_data.get('ts_src') == "LINE":
-                            ts_txt = f"　🕒 {ts:%m/%d} 第{photo_data.get('seq', 0)}張"
-                        elif ts:
-                            ts_txt = f"　🕒 {ts:%m/%d %H:%M}"
-                        else:
-                            ts_txt = "　🕒 無時間資訊"
-                        st.caption(f"No. {i+1:02d}{ts_txt}")
-                        ai = photo_data.get('ai')
-                        if ai:
-                            if ai.get('error'):
-                                st.warning(f"🤖 {ai['error']}")
+            if PREVIEW_OK:
+                tab_prev, tab_edit = st.tabs(["👀 預覽排版（拖拉換位置）", "✏️ 逐張編輯文字"])
+            else:
+                tab_prev, tab_edit = None, st.container()
+
+            if tab_prev is not None:
+                with tab_prev:
+                    def _info(pp):
+                        d = st.session_state.get(f"desc_{g}_{pp['id']}", pp.get('desc', ''))
+                        de = st.session_state.get(f"design_{g}_{pp['id']}", pp.get('design', ''))
+                        r = st.session_state.get(f"result_{g}_{pp['id']}", pp.get('result', ''))
+                        t = f"日期：{date_display}\n說明：{d}"
+                        if (de or "").strip(): t += f"\n設計：{de}"
+                        if (r or "").strip() or (de or "").strip(): t += f"\n實測：{r}"
+                        return t
+                    cells = [{"id": pp['id'], "thumb": preview_thumb(pp), "info": _info(pp),
+                              "board": bool(pp.get('is_board'))} for pp in photo_list]
+                    header = {"project": p_name, "contractor": p_cont, "sub": p_sub,
+                              "location": p_loc, "item": g_item}
+                    new_ids = report_preview(f"preview_{g}", header, cells, slots_locked(g))
+                    if new_ids:
+                        by_id = {pp['id']: pp for pp in photo_list}
+                        reorder_photos(g, [by_id[i] for i in new_ids])
+                        st.rerun()
+
+            with tab_edit:
+                for i, photo_data in enumerate(photo_list):
+                    with st.container():
+                        col_img, col_info, col_ctrl = st.columns([1.5, 3, 0.5])
+                        pid = photo_data['id']
+                        with col_img:
+                            if 'thumb' not in photo_data: photo_data['thumb'] = make_thumb(photo_data['file'])
+                            st.image(photo_data['thumb'] or photo_data['file'], use_container_width=True)
+                            ts = photo_data.get('ts')
+                            if ts and photo_data.get('ts_src') == "LINE":
+                                ts_txt = f"　🕒 {ts:%m/%d} 第{photo_data.get('seq', 0)}張"
+                            elif ts:
+                                ts_txt = f"　🕒 {ts:%m/%d %H:%M}"
                             else:
-                                conf = float(ai.get('confidence') or 0)
-                                tag = "🟢" if conf >= 0.8 else ("🟡" if conf >= 0.5 else "🔴")
-                                st.caption(f"{tag} AI 信心 {conf:.0%}" + (f"｜{ai['notes']}" if ai.get('notes') else ""))
-                                if ai.get('off_category'):
-                                    st.caption("⚠️ 這張白板的工項跟本組不同，可能要移到別組")
-                                if ai.get('uncertain'):
-                                    st.warning("🧐 AI 沒把握，請對照照片確認：\n\n" +
-                                               "\n".join(f"- {u}" for u in ai['uncertain']))
-                                st.caption(f"📋 這是白板，讀到 {ai.get('n_items', 0)} 個檢查項目")
-                                b = ai.get('board') or {}
-                                labels = [("location", "位置"), ("date", "日期"), ("inspection_item", "項目"),
-                                          ("seq", "編號"), ("design_values", "設計"), ("measured_values", "實測")]
-                                lines = [f"{lb}：{b.get(k)}" for k, lb in labels if b.get(k)]
-                                if lines or ai.get('raw_text'):
-                                    with st.expander("🔍 AI 讀到的白板"):
-                                        if lines: st.text("\n".join(lines))
-                                        if ai.get('raw_text'):
-                                            st.caption("白板手寫逐字抄錄（□＝看不清楚）：")
-                                            st.text(ai['raw_text'])
-                                        if ai.get('model_used'):
-                                            st.caption(f"判讀模型：{GEMINI_MODEL_LABELS.get(ai['model_used'], ai['model_used'])}")
-                    with col_info:
-                        if photo_data.get('slot_tag'):
-                            t1, t2 = st.columns([3, 1])
-                            t1.markdown(f"**📋 {photo_data['slot_tag']}**")
-                            if photo_data.get('slot_ai'):
-                                t2.button("↩️ 還原 AI", key=f"ai_undo_{g}_{i}", on_click=restore_ai_result,
-                                          args=(g, i), help="把這格改回 AI 讀到的內容")
-                        def on_select_change(pk=pid, gk=g):
-                            k = f"sel_{gk}_{pk}"
-                            if k not in st.session_state: return
-                            new_idx = st.session_state[k]
-                            dk, desk, rk = f"desc_{gk}_{pk}", f"design_{gk}_{pk}", f"result_{gk}_{pk}"
-                            if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(check_items_list):
-                                item_data = check_items_list[new_idx-1]
-                                st.session_state[dk] = item_data['desc']
-                                st.session_state[desk] = item_data['design']
-                                st.session_state[rk] = item_data['result']
-                            else:
-                                st.session_state[dk] = ""
-                                st.session_state[desk] = ""
-                                st.session_state[rk] = ""
+                                ts_txt = "　🕒 無時間資訊"
+                            st.caption(f"No. {i+1:02d}{ts_txt}")
+                            ai = photo_data.get('ai')
+                            if ai:
+                                if ai.get('error'):
+                                    st.warning(f"🤖 {ai['error']}")
+                                else:
+                                    conf = float(ai.get('confidence') or 0)
+                                    tag = "🟢" if conf >= 0.8 else ("🟡" if conf >= 0.5 else "🔴")
+                                    st.caption(f"{tag} AI 信心 {conf:.0%}" + (f"｜{ai['notes']}" if ai.get('notes') else ""))
+                                    if ai.get('off_category'):
+                                        st.caption("⚠️ 這張白板的工項跟本組不同，可能要移到別組")
+                                    if ai.get('uncertain'):
+                                        st.warning("🧐 AI 沒把握，請對照照片確認：\n\n" +
+                                                   "\n".join(f"- {u}" for u in ai['uncertain']))
+                                    st.caption(f"📋 這是白板，讀到 {ai.get('n_items', 0)} 個檢查項目")
+                                    b = ai.get('board') or {}
+                                    labels = [("location", "位置"), ("date", "日期"), ("inspection_item", "項目"),
+                                              ("seq", "編號"), ("design_values", "設計"), ("measured_values", "實測")]
+                                    lines = [f"{lb}：{b.get(k)}" for k, lb in labels if b.get(k)]
+                                    if lines or ai.get('raw_text'):
+                                        with st.expander("🔍 AI 讀到的白板"):
+                                            if lines: st.text("\n".join(lines))
+                                            if ai.get('raw_text'):
+                                                st.caption("白板手寫逐字抄錄（□＝看不清楚）：")
+                                                st.text(ai['raw_text'])
+                                            if ai.get('model_used'):
+                                                st.caption(f"判讀模型：{GEMINI_MODEL_LABELS.get(ai['model_used'], ai['model_used'])}")
+                        with col_info:
+                            if photo_data.get('slot_tag'):
+                                t1, t2 = st.columns([3, 1])
+                                t1.markdown(f"**📋 {photo_data['slot_tag']}**")
+                                if photo_data.get('slot_ai'):
+                                    t2.button("↩️ 還原 AI", key=f"ai_undo_{g}_{i}", on_click=restore_ai_result,
+                                              args=(g, i), help="把這格改回 AI 讀到的內容")
+                            def on_select_change(pk=pid, gk=g):
+                                k = f"sel_{gk}_{pk}"
+                                if k not in st.session_state: return
+                                new_idx = st.session_state[k]
+                                dk, desk, rk = f"desc_{gk}_{pk}", f"design_{gk}_{pk}", f"result_{gk}_{pk}"
+                                if isinstance(new_idx, int) and new_idx > 0 and new_idx <= len(check_items_list):
+                                    item_data = check_items_list[new_idx-1]
+                                    st.session_state[dk] = item_data['desc']
+                                    st.session_state[desk] = item_data['design']
+                                    st.session_state[rk] = item_data['result']
+                                else:
+                                    st.session_state[dk] = ""
+                                    st.session_state[desk] = ""
+                                    st.session_state[rk] = ""
 
-                        current_opt_idx = photo_data.get('selected_opt_index', 0)
-                        if current_opt_idx > len(options): current_opt_idx = 0
-                        st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
+                            current_opt_idx = photo_data.get('selected_opt_index', 0)
+                            if current_opt_idx > len(options): current_opt_idx = 0
+                            st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
 
-                        def on_text_change(field, pk=pid, idx=i, gk=g): 
-                            val = st.session_state[f"{field}_{gk}_{pk}"]
-                            st.session_state[f"photos_{gk}"][idx][field] = val
-                            if field == 'sel': st.session_state[f"photos_{gk}"][idx]['selected_opt_index'] = val
+                            def on_text_change(field, pk=pid, idx=i, gk=g): 
+                                val = st.session_state[f"{field}_{gk}_{pk}"]
+                                st.session_state[f"photos_{gk}"][idx][field] = val
+                                if field == 'sel': st.session_state[f"photos_{gk}"][idx]['selected_opt_index'] = val
 
-                        desc_key = f"desc_{g}_{pid}"
-                        design_key = f"design_{g}_{pid}"
-                        result_key = f"result_{g}_{pid}"
-                        if desc_key not in st.session_state: st.session_state[desc_key] = photo_data.get('desc', '')
-                        if design_key not in st.session_state: st.session_state[design_key] = photo_data.get('design', '')
-                        if result_key not in st.session_state: st.session_state[result_key] = photo_data.get('result', '')
+                            desc_key = f"desc_{g}_{pid}"
+                            design_key = f"design_{g}_{pid}"
+                            result_key = f"result_{g}_{pid}"
+                            if desc_key not in st.session_state: st.session_state[desc_key] = photo_data.get('desc', '')
+                            if design_key not in st.session_state: st.session_state[design_key] = photo_data.get('design', '')
+                            if result_key not in st.session_state: st.session_state[result_key] = photo_data.get('result', '')
 
-                        st.text_input("說明", key=desc_key, on_change=on_text_change, args=('desc',))
-                        st.text_input("設計 (可留空)", key=design_key, on_change=on_text_change, args=('design',))
-                        st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
+                            st.text_input("說明", key=desc_key, on_change=on_text_change, args=('desc',))
+                            st.text_input("設計 (可留空)", key=design_key, on_change=on_text_change, args=('design',))
+                            st.text_input("實測", key=result_key, on_change=on_text_change, args=('result',))
 
-                    with col_ctrl:
-                        st.button("⬆️", key=f"up_{g}_{i}", on_click=move_photo, args=(g, i, -1))
-                        st.button("⬇️", key=f"down_{g}_{i}", on_click=move_photo, args=(g, i, 1))
-                        if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
-                        if AI_CFG:
-                            st.button("🤖", key=f"ai_one_{g}_{i}", help="把這張當白板辨識（AI 沒認出白板、或讀錯時用）",
-                                      on_click=run_ai_on_group, args=(g, i))
-                    st.divider()
+                        with col_ctrl:
+                            st.button("⬆️", key=f"up_{g}_{i}", on_click=move_photo, args=(g, i, -1))
+                            st.button("⬇️", key=f"down_{g}_{i}", on_click=move_photo, args=(g, i, 1))
+                            if st.button("❌", key=f"del_{g}_{i}"): delete_photo(g, i); st.rerun()
+                            if AI_CFG:
+                                st.button("🤖", key=f"ai_one_{g}_{i}", help="把這張當白板辨識（AI 沒認出白板、或讀錯時用）",
+                                          on_click=run_ai_on_group, args=(g, i))
+                        st.divider()
 
             g_photos_export = []
             for i, p in enumerate(photo_list):
