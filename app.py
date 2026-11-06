@@ -394,7 +394,9 @@ def _set_slot(g_idx, p, v):
         p[f] = v.get(f, "")
         st.session_state[f"{f}_{g_idx}_{p['id']}"] = p[f]
     p['selected_opt_index'] = v.get('opt', 0) or 0
-    st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)  # 下拉選單依新的 index 重建
+    # 直接設定下拉選單的值（不要刪掉重建：瀏覽器還記得舊選項，會被當成「使用者改了選單」
+    # 而觸發自動帶入，把說明蓋掉或清空）
+    st.session_state[f"sel_{g_idx}_{p['id']}"] = p['selected_opt_index']
     p['slot_tag'] = v.get('tag')
     p['slot_ai'] = v.get('ai_vals')
 
@@ -725,7 +727,7 @@ def run_ai_on_group(g_idx, only_index=None):
         for i, p in enumerate(photos):
             if i not in filled:
                 p['selected_opt_index'] = 0
-                st.session_state.pop(f"sel_{g_idx}_{p['id']}", None)
+                st.session_state[f"sel_{g_idx}_{p['id']}"] = 0
 
     # 3) 位置／日期帶入側邊欄（取第一張有讀到的）
     if st.session_state.get("ai_fill_meta", True):
@@ -1098,9 +1100,22 @@ if st.session_state['saved_template']:
                                     st.session_state[desk] = ""
                                     st.session_state[rk] = ""
 
+                            sel_key = f"sel_{g}_{pid}"
                             current_opt_idx = photo_data.get('selected_opt_index', 0)
-                            if current_opt_idx > len(options): current_opt_idx = 0
-                            st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x], index=current_opt_idx, key=f"sel_{g}_{pid}", on_change=on_select_change, label_visibility="collapsed")
+                            if not isinstance(current_opt_idx, int) or not 0 <= current_opt_idx < len(options):
+                                current_opt_idx = 0
+                            if sel_key in st.session_state:
+                                # 值由程式設定好了（換位置、AI 填入）：不再傳 index，避免跟設定值打架
+                                v = st.session_state[sel_key]
+                                if not isinstance(v, int) or not 0 <= v < len(options):
+                                    st.session_state[sel_key] = current_opt_idx
+                                st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x],
+                                             key=sel_key, on_change=on_select_change, label_visibility="collapsed")
+                            else:
+                                st.selectbox("快速填寫", range(len(options)), format_func=lambda x: options[x],
+                                             index=current_opt_idx, key=sel_key, on_change=on_select_change,
+                                             label_visibility="collapsed")
+                            photo_data['selected_opt_index'] = st.session_state.get(sel_key, current_opt_idx)
 
                             def on_text_change(field, pk=pid, idx=i, gk=g): 
                                 val = st.session_state[f"{field}_{gk}_{pk}"]
